@@ -5,7 +5,7 @@ Authors@R:
     person(given = "Alex", 
            family = "Jorion", 
            role = c("aut", "cre"), 
-           email = "alex.jorion@firstzero.com")
+           email = "alex.jorion@firstzeroenergy.com")
 Description: Tools for converting R data frames and 'sf' spatial objects
     into JSON and GeoJSON strings. The core encoders are implemented in Rust
     using the 'extendr' framework and are designed to efficiently serialize
@@ -15,7 +15,7 @@ Description: Tools for converting R data frames and 'sf' spatial objects
     overhead.
 License: MIT + file LICENSE
 URL: https://github.com/firstzeroenergy/fastgeojson
-BugReports: https://github.com/firstzero/fastgeojson/issues
+BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
 SystemRequirements: Cargo (Rust's package manager), rustc
 Encoding: UTF-8
 LazyData: true
