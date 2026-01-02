@@ -1,0 +1,4 @@
+useDynLib(fastgeojson, .registration = TRUE)
+
+export(sf_geojson_str)
+export(df_json_str)

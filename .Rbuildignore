@@ -1,0 +1,6 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^src/rust/target$
+^README\.Rmd$
+^README\.html$
+^\.github$
