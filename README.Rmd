@@ -21,9 +21,8 @@ Implemented in Rust via the **extendr** framework, it uses parallel processing a
 
 The resulting strings are ready for immediate use in web applications (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and other R packages that interface with JavaScript.
 
-> **Status: v0.1.0 (Beta)** — This release demonstrates the performance
-> potential of Rust-based serialization in R. While thoroughly tested on
-> common use cases, feedback on edge cases is highly encouraged!
+> **Status: v0.1.1 (Beta)** — Stable for production use via R-universe.
+> Builds are reproducible and compatible with `shinyapps.io` and Linux environments.
 
 ## Performance Benchmarks
 
@@ -53,13 +52,36 @@ data.frame(
 
 ## Installation
 
-```r
-# Preferred: pre-compiled binaries via r-universe (no Rust required)
-install.packages("fastgeojson", repos = "https://firstzeroenergy.r-universe.dev")
+You can install the package directly from our R-universe repository. This provides pre-compiled binaries for Windows/macOS (no Rust required) and source packages for Linux.
 
-# Development version from GitHub (requires Rust toolchain)
-# remotes::install_github("firstzeroenergy/fastgeojson")
+```r
+# 1. Enable the repository
+options(repos = c(
+  firstzero = "[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)",
+  CRAN = "[https://cloud.r-project.org](https://cloud.r-project.org)"
+))
+
+# 2. Install
+install.packages("fastgeojson")
 ```
+
+## Deploying to shinyapps.io
+
+If you use `fastgeojson` in a Shiny app and deploy to **shinyapps.io** or **Posit Connect**, you **must** specify the repository URL in your project's `.Rprofile`. 
+
+Without this, the deployment server will fail with an *"Unknown repository"* error because it does not know where to download this package.
+
+**The Fix:**
+Create a file named `.Rprofile` in your app's root directory with the following content:
+
+```r
+options(repos = c(
+  firstzero = "[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)",
+  CRAN = "[https://cloud.r-project.org](https://cloud.r-project.org)"
+))
+```
+
+This ensures the build server can find and install `fastgeojson` automatically.
 
 ## Main Features of the Rust Implementation
 
@@ -154,7 +176,7 @@ cat(substr(json, 1, 120))
 
 ## Development
 
-- Rust implementation: `src/rust/`
+- Rust implementation: `src/rust/` (managed via `rust-toolchain.toml` for reproducible builds)
 - R interface: `R/`
 - Built with **extendr**
 
