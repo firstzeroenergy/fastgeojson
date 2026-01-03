@@ -2,7 +2,7 @@ use extendr_api::prelude::*;
 use libR_sys;
 use libR_sys::SEXPTYPE::{INTSXP, LGLSXP, REALSXP, STRSXP, VECSXP};
 use rayon::prelude::*;
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::thread;
@@ -581,7 +581,7 @@ fn detect_sfc_type_sexp(geom_col_sexp: libR_sys::SEXP) -> SfcType {
             for i in 0..n {
                 let s = libR_sys::STRING_ELT(classes, i as isize);
                 let p = libR_sys::R_CHAR(s);
-                let c_str = CStr::from_ptr(p as *const i8);
+                let c_str = CStr::from_ptr(p as *const c_char);
                 match c_str.to_str().unwrap_or("") {
                     "sfc_POINT" => return SfcType::Point,
                     "sfc_MULTIPOINT" => return SfcType::MultiPoint,
@@ -606,7 +606,7 @@ fn get_row_sfg_type(sfg: libR_sys::SEXP) -> SfcType {
             for i in 0..n {
                 let s = libR_sys::STRING_ELT(classes, i as isize);
                 let p = libR_sys::R_CHAR(s);
-                let c_str = CStr::from_ptr(p as *const i8);
+                let c_str = CStr::from_ptr(p as *const c_char);
                 match c_str.to_str().unwrap_or("") {
                     "POINT" => return SfcType::Point,
                     "MULTIPOINT" => return SfcType::MultiPoint,

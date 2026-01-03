@@ -17,7 +17,7 @@ knitr::opts_chunk$set(
 
 `fastgeojson` provides extremely fast conversion of `sf` objects to GeoJSON FeatureCollection strings and rectangular tabular objects (`data.frame`, `data.table`, `tibble`) to JSON arrays of row objects.
 
-Implemented in Rust via the **extendr** framework, it uses parallel processing and low-level optimizations to deliver **1.5–6× speedups** over existing R solutions on large datasets.
+Implemented in Rust via the **extendr** framework, it uses parallel processing and low-level optimizations to deliver **2.3–8× speedups** over existing R solutions on large datasets.
 
 The resulting strings are ready for immediate use in web applications (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and other R packages that interface with JavaScript.
 
@@ -34,8 +34,8 @@ Benchmarks conducted with `microbenchmark` (times in milliseconds; lower is bett
 ```{r json-bench, echo=FALSE}
 data.frame(
   Package     = c("jsonify", "jsonlite", "yyjsonr", "fastgeojson"),
-  Median_ms   = c(1575, 1348, 231, 158),
-  `Speedup vs yyjsonr` = c("—", "—", "1×", "1.5×")
+  Median_ms   = c(1904, 1443, 236, 102),
+  `Speedup vs yyjsonr` = c("—", "—", "1×", "2.3×")
 ) |> 
   knitr::kable()
 ```
@@ -45,8 +45,8 @@ data.frame(
 ```{r geojson-bench, echo=FALSE}
 data.frame(
   Package     = c("geojsonsf", "yyjsonr", "fastgeojson"),
-  Median_ms   = c(1940, 563, 332),
-  `Speedup vs yyjsonr` = c("—", "1×", "1.7×")
+  Median_ms   = c(2065, 585, 233),
+  `Speedup vs yyjsonr` = c("—", "1×", "2.5×")
 ) |> 
   knitr::kable()
 ```
