@@ -11,7 +11,8 @@ extendr-api = "0.7"
 libR-sys = "0.7"
 itoa = "1"
 ryu = "1"
-rayon = "1.10"
+rayon = "=1.10.0"
+rayon-core = "=1.12.1"
 
 [profile.release]
 opt-level = 3       
