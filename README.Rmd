@@ -57,8 +57,8 @@ You can install the package directly from our R-universe repository. This provid
 ```r
 # 1. Enable the repository
 options(repos = c(
-  firstzero = "[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)",
-  CRAN = "[https://cloud.r-project.org](https://cloud.r-project.org)"
+  firstzero = "https://firstzeroenergy.r-universe.dev",
+  CRAN = "https://cloud.r-project.org"
 ))
 
 # 2. Install
@@ -76,8 +76,8 @@ Create a file named `.Rprofile` in your app's root directory with the following 
 
 ```r
 options(repos = c(
-  firstzero = "[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)",
-  CRAN = "[https://cloud.r-project.org](https://cloud.r-project.org)"
+  firstzero = "https://firstzeroenergy.r-universe.dev",
+  CRAN = "https://cloud.r-project.org"
 ))
 ```
 

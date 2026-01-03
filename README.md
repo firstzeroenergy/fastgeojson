@@ -51,8 +51,8 @@ and source packages for Linux.
 ``` r
 # 1. Enable the repository
 options(repos = c(
-  firstzero = "[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)",
-  CRAN = "[https://cloud.r-project.org](https://cloud.r-project.org)"
+  firstzero = "https://firstzeroenergy.r-universe.dev",
+  CRAN = "https://cloud.r-project.org"
 ))
 
 # 2. Install
@@ -74,8 +74,8 @@ directory with the following content:
 
 ``` r
 options(repos = c(
-  firstzero = "[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)",
-  CRAN = "[https://cloud.r-project.org](https://cloud.r-project.org)"
+  firstzero = "https://firstzeroenergy.r-universe.dev",
+  CRAN = "https://cloud.r-project.org"
 ))
 ```
 

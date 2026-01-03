@@ -693,8 +693,8 @@ This provides pre-compiled binaries for Windows/macOS (no Rust required)
 and source packages for Linux.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># 1. Enable the repository</span></span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
-<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)&quot;</span>,</span>
-<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;[https://cloud.r-project.org](https://cloud.r-project.org)&quot;</span></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
 <span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>))</span>
 <span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a></span>
 <span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="co"># 2. Install</span></span>
@@ -710,8 +710,8 @@ package.</p>
 <p><strong>The Fix:</strong> Create a file named <code>.Rprofile</code>
 in your app’s root directory with the following content:</p>
 <div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;[https://firstzeroenergy.r-universe.dev](https://firstzeroenergy.r-universe.dev)&quot;</span>,</span>
-<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;[https://cloud.r-project.org](https://cloud.r-project.org)&quot;</span></span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
 <span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>))</span></code></pre></div>
 <p>This ensures the build server can find and install
 <code>fastgeojson</code> automatically.</p>
