@@ -22,10 +22,10 @@ microbenchmark(
     jlt <- jsonlite::toJSON( df )
   },
   yyjsonr = {
-    yyj <- write_json_str(df)
+    yyj <- yyjsonr::write_json_str(df)
   },
   fastgeojson = {
-    fst <- df_json_str(df)
+    fst <- fastgeojson::df_json_str(df)
   },
   times = 10L
 )
