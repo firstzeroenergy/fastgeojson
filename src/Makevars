@@ -1,0 +1,21 @@
+# src/Makevars (Linux/macOS)
+
+TARGET_DIR = rust/target
+LIBDIR     = $(TARGET_DIR)/release
+STATLIB    = $(LIBDIR)/libfastgeojson.a
+
+PKG_LIBS   = -L$(LIBDIR) -lfastgeojson
+
+all: $(SHLIB)
+
+# Build Rust first, then link the shared library
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	cargo build --release --lib \
+	  --manifest-path=rust/Cargo.toml \
+	  --target-dir $(TARGET_DIR)
+
+clean:
+	rm -f $(SHLIB) $(OBJECTS)
+	rm -rf $(TARGET_DIR)

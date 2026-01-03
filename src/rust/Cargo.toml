@@ -1,6 +1,6 @@
 [package]
 name = "fastgeojson"
-version = "0.0.1"
+version = "0.1.0"  # Updated to match R package
 edition = "2021"
 
 [lib]
@@ -13,8 +13,9 @@ itoa = "1"
 ryu = "1"
 rayon = "1.10"
 
-[profile.dev]
-panic = "unwind"
-
 [profile.release]
-panic = "unwind"
+opt-level = 3       
+lto = "fat"         
+codegen-units = 1   
+panic = "unwind"    
+strip = true       
