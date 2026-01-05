@@ -1,5 +1,5 @@
 use extendr_api::prelude::*;
-use extendr_ffi as libR_sys; // Alias the new FFI crate to the old name
+use extendr_ffi as libR_sys;
 use rayon::prelude::*;
 use std::ffi::{CStr, c_char};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -278,7 +278,7 @@ fn build_property_columns_single(df: &List, colnames: &[String], geom_idx: usize
             (ColumnType::Factor, unsafe { libR_sys::INTEGER(col_sexp) as *const u8 }, Some(cache))
         } else if r_type == Rtype::Integers {
             (ColumnType::Int, unsafe { libR_sys::INTEGER(col_sexp) as *const u8 }, None)
-        } else if r_type == Rtype::Doubles { // <--- FIXED: Reals -> Doubles
+        } else if r_type == Rtype::Doubles { 
             (ColumnType::Real, unsafe { libR_sys::REAL(col_sexp) as *const u8 }, None)
         } else if r_type == Rtype::Logicals {
             (ColumnType::Bool, unsafe { libR_sys::LOGICAL(col_sexp) as *const u8 }, None)
@@ -461,7 +461,7 @@ fn build_thread_safe_cols(
             (ColumnType::Factor, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, Some(cache), None)
         } else if r_type == Rtype::Integers {
             (ColumnType::Int, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, None, None)
-        } else if r_type == Rtype::Doubles { // <--- FIXED: Reals -> Doubles
+        } else if r_type == Rtype::Doubles { 
             (ColumnType::Real, unsafe { libR_sys::REAL(sexp) as *const u8 as usize }, None, None)
         } else if r_type == Rtype::Logicals {
             (ColumnType::Bool, unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize }, None, None)
@@ -973,6 +973,15 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
 
         out.push_bytes(FC_TAIL);
 
+        // --- FIXED: SIZE CHECK 1 ---
+        if out.buf.len() > i32::MAX as usize {
+            return rerr(format!(
+                "Resulting GeoJSON string size ({} bytes) exceeds R's 2GB limit. Please filter your data or write to a file.",
+                out.buf.len()
+            ));
+        }
+        // ---------------------------
+
         let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(out.buf) });
         robj.set_class(&["geojson", "json"])?;
         return Ok(robj);
@@ -1030,6 +1039,15 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
         final_out.extend_from_slice(&chunk);
     }
     final_out.extend_from_slice(FC_TAIL);
+
+    // --- FIXED: SIZE CHECK 2 ---
+    if final_out.len() > i32::MAX as usize {
+        return rerr(format!(
+            "Resulting GeoJSON string size ({} bytes) exceeds R's 2GB limit. Please filter your data or write to a file.",
+            final_out.len()
+        ));
+    }
+    // ---------------------------
 
     let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(final_out) });
     robj.set_class(&["geojson", "json"])?;
@@ -1129,6 +1147,15 @@ fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
         final_out.extend_from_slice(&chunk);
     }
     final_out.push(b']');
+
+    // --- FIXED: SIZE CHECK 3 ---
+    if final_out.len() > i32::MAX as usize {
+        return rerr(format!(
+            "Resulting JSON string size ({} bytes) exceeds R's 2GB limit. Please filter your data or write to a file.",
+            final_out.len()
+        ));
+    }
+    // ---------------------------
 
     let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(final_out) });
     robj.set_class(&["json"])?;
