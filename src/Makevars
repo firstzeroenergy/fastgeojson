@@ -15,6 +15,7 @@ $(STATLIB):
 	rustc --version
 	cargo --version
 
+	RUSTFLAGS="$(RUSTFLAGS)" \
 	cargo build --release --lib \
 	  --manifest-path=rust/Cargo.toml \
 	  --target-dir $(TARGET_DIR)

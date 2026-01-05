@@ -1,4 +1,2 @@
-# src/Makevars.darwin
-# macOS-only linker flags: drop unused symbols (helps remove `_abort` from final .so)
-
 PKG_LIBS = $(PKG_LIBS) -Wl,-dead_strip
+RUSTFLAGS = $(RUSTFLAGS) -C link-arg=-Wl,-dead_strip

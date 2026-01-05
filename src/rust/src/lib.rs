@@ -179,7 +179,12 @@ fn build_escaped_key_bytes(name: &str) -> Vec<u8> {
 
 #[inline(always)]
 unsafe fn sexp_len(x: libR_sys::SEXP) -> usize {
-    libR_sys::Rf_xlength(x) as usize
+    let n = libR_sys::Rf_xlength(x); // R_xlen_t (64-bit)
+    if n < 0 {
+        // should never happen, but keep it explicit
+        return 0;
+    }
+    n as usize
 }
 
 #[inline(always)]
