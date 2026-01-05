@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-extendr-api = "0.7"
-libR-sys = "0.7"
+extendr-api = "0.8"
+extendr-ffi = "0.8"
 itoa = "1"
 ryu = "1"
 rayon = "=1.10.0"

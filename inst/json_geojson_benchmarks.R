@@ -1,9 +1,11 @@
 library(microbenchmark)
+library(sf)
 library(jsonlite)
+library(jsonify)
 library(yyjsonr)
 library(geojsonsf)
-library(sf)
 library(fastgeojson)
+
 
 # Create a large df point dataset: 1 million points
 n <- 1e6

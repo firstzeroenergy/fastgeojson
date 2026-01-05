@@ -9,7 +9,7 @@ GeoJSON FeatureCollection strings and rectangular tabular objects
 (`data.frame`, `data.table`, `tibble`) to JSON arrays of row objects.
 
 Implemented in Rust via the **extendr** framework, it uses parallel
-processing and low-level optimizations to deliver **2.3–8× speedups**
+processing and low-level optimizations to deliver **2.3–15× speedups**
 over existing R solutions on large datasets.
 
 The resulting strings are ready for immediate use in web applications
@@ -29,18 +29,18 @@ is better).
 
 | Package     | Median_ms | Speedup.vs.yyjsonr |
 |:------------|----------:|:-------------------|
-| jsonify     |      1904 | —                  |
-| jsonlite    |      1443 | —                  |
-| yyjsonr     |       236 | 1×                 |
-| fastgeojson |       102 | 2.3×               |
+| jsonify     |      1573 | —                  |
+| jsonlite    |      1281 | —                  |
+| yyjsonr     |       235 | 1×                 |
+| fastgeojson |        98 | 2.4×               |
 
 ### GeoJSON serialization: 1 million point features
 
 | Package     | Median_ms | Speedup.vs.yyjsonr |
 |:------------|----------:|:-------------------|
-| geojsonsf   |      2065 | —                  |
-| yyjsonr     |       585 | 1×                 |
-| fastgeojson |       233 | 2.5×               |
+| geojsonsf   |      1920 | —                  |
+| yyjsonr     |       586 | 1×                 |
+| fastgeojson |       238 | 2.5×               |
 
 ## Installation
 

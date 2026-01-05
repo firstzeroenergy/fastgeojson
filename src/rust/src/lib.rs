@@ -1,6 +1,5 @@
 use extendr_api::prelude::*;
-use libR_sys;
-use libR_sys::SEXPTYPE::{INTSXP, LGLSXP, REALSXP, STRSXP, VECSXP};
+use extendr_ffi as libR_sys; // Alias the new FFI crate to the old name
 use rayon::prelude::*;
 use std::ffi::{CStr, c_char};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -180,17 +179,17 @@ fn build_escaped_key_bytes(name: &str) -> Vec<u8> {
 
 #[inline(always)]
 unsafe fn sexp_len(x: libR_sys::SEXP) -> usize {
-    libR_sys::Rf_length(x) as usize
+    libR_sys::Rf_xlength(x) as usize
 }
 
 #[inline(always)]
-unsafe fn typeof_sexp(x: libR_sys::SEXP) -> libR_sys::SEXPTYPE {
-    libR_sys::TYPEOF(x)
+unsafe fn typeof_sexp(x: libR_sys::SEXP) -> u32 {
+    libR_sys::TYPEOF(x) as u32
 }
 
 #[inline(always)]
 unsafe fn safe_vector_elt(x: libR_sys::SEXP, i: usize) -> Option<libR_sys::SEXP> {
-    if x == libR_sys::R_NilValue || typeof_sexp(x) != VECSXP || i >= sexp_len(x) {
+    if x == libR_sys::R_NilValue || typeof_sexp(x) != libR_sys::SEXPTYPE::VECSXP as u32 || i >= sexp_len(x) {
         None
     } else {
         Some(libR_sys::VECTOR_ELT(x, i as isize))
@@ -222,7 +221,7 @@ unsafe fn charsxp_to_utf8_bytes(charsxp: libR_sys::SEXP) -> Option<&'static [u8]
     if charsxp == libR_sys::R_NilValue || is_na_string(charsxp) {
         return None;
     }
-    let cptr = libR_sys::Rf_translateCharUTF8(charsxp);
+    let cptr = libR_sys::R_CHAR(charsxp);
     if cptr.is_null() {
         return None;
     }
@@ -234,7 +233,7 @@ unsafe fn charsxp_to_utf8_bytes(charsxp: libR_sys::SEXP) -> Option<&'static [u8]
 struct PropertyColumn {
     name_key: Vec<u8>,
     kind: ColumnType,
-    data_ptr: *const u8,
+    data_ptr: *const u8, 
     cached_levels: Option<Vec<Vec<u8>>>,
     len: usize,
 }
@@ -254,10 +253,10 @@ fn build_property_columns_single(df: &List, colnames: &[String], geom_idx: usize
 
         let col_sexp = unsafe { col.get() };
         let len = unsafe { sexp_len(col_sexp) };
-        let sexp_type = unsafe { typeof_sexp(col_sexp) };
+        let r_type = col.rtype(); 
         let name_key = build_escaped_key_bytes(nm);
 
-        let (kind, ptr_addr, cached_levels) = if col.inherits("factor") && sexp_type == INTSXP {
+        let (kind, ptr_addr, cached_levels) = if col.inherits("factor") && r_type == Rtype::Integers {
             let levels = match col.get_attrib("levels") { Some(l) => l, None => continue };
             let levels_sexp = unsafe { levels.get() };
             let n_lev = unsafe { sexp_len(levels_sexp) };
@@ -277,14 +276,14 @@ fn build_property_columns_single(df: &List, colnames: &[String], geom_idx: usize
             }
 
             (ColumnType::Factor, unsafe { libR_sys::INTEGER(col_sexp) as *const u8 }, Some(cache))
-        } else if sexp_type == INTSXP {
+        } else if r_type == Rtype::Integers {
             (ColumnType::Int, unsafe { libR_sys::INTEGER(col_sexp) as *const u8 }, None)
-        } else if sexp_type == REALSXP {
+        } else if r_type == Rtype::Doubles { // <--- FIXED: Reals -> Doubles
             (ColumnType::Real, unsafe { libR_sys::REAL(col_sexp) as *const u8 }, None)
-        } else if sexp_type == LGLSXP {
+        } else if r_type == Rtype::Logicals {
             (ColumnType::Bool, unsafe { libR_sys::LOGICAL(col_sexp) as *const u8 }, None)
-        } else if sexp_type == STRSXP {
-            (ColumnType::Char, unsafe { libR_sys::DATAPTR(col_sexp) as *const u8 }, None)
+        } else if r_type == Rtype::Strings {
+            (ColumnType::Char, col_sexp as *const u8, None)
         } else {
             (ColumnType::Null, ptr::null(), None)
         };
@@ -315,7 +314,9 @@ unsafe fn write_prop_value_single(out: &mut JsonWriter, pc: &PropertyColumn, row
             if !is_na_int(v) { out.push_bool(v != 0); true } else { false }
         }
         ColumnType::Char => {
-            let elt = *(pc.data_ptr as *const libR_sys::SEXP).add(row);
+            let vec_sexp = pc.data_ptr as libR_sys::SEXP;
+            let elt = libR_sys::STRING_ELT(vec_sexp, row as isize);
+            
             if elt != libR_sys::R_NilValue && !is_na_string(elt) {
                 out.push_charsxp_as_json_string(elt);
                 true
@@ -352,7 +353,7 @@ fn write_coords_matrix_single(out: &mut JsonWriter, geom: libR_sys::SEXP) {
     out.reserve(nrow * 55);
 
     out.push_u8(b'[');
-    if unsafe { typeof_sexp(geom) } == REALSXP {
+    if unsafe { typeof_sexp(geom) } == libR_sys::SEXPTYPE::REALSXP as u32 {
         let p = unsafe { libR_sys::REAL(geom) };
         for i in 0..nrow {
             if i > 0 {
@@ -436,10 +437,10 @@ fn build_thread_safe_cols(
             ));
         }
 
-        let sexp_type = unsafe { typeof_sexp(sexp) };
+        let r_type = col.rtype();
         let key = build_escaped_key_bytes(nm);
 
-        let (kind, ptr, cached_levels, arena) = if col.inherits("factor") && sexp_type == INTSXP {
+        let (kind, ptr, cached_levels, arena) = if col.inherits("factor") && r_type == Rtype::Integers {
             let levels = col
                 .get_attrib("levels")
                 .ok_or_else(|| Error::Other("Factor missing levels".to_string()))?;
@@ -458,13 +459,13 @@ fn build_thread_safe_cols(
             }
 
             (ColumnType::Factor, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, Some(cache), None)
-        } else if sexp_type == INTSXP {
+        } else if r_type == Rtype::Integers {
             (ColumnType::Int, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, None, None)
-        } else if sexp_type == REALSXP {
+        } else if r_type == Rtype::Doubles { // <--- FIXED: Reals -> Doubles
             (ColumnType::Real, unsafe { libR_sys::REAL(sexp) as *const u8 as usize }, None, None)
-        } else if sexp_type == LGLSXP {
+        } else if r_type == Rtype::Logicals {
             (ColumnType::Bool, unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize }, None, None)
-        } else if sexp_type == STRSXP {
+        } else if r_type == Rtype::Strings {
             let n = unsafe { sexp_len(sexp) };
             let mut bytes = Vec::with_capacity(n * 16);
             let mut offsets = Vec::with_capacity(n);
@@ -877,7 +878,9 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
 
     let geom_col_robj = df.elt(geom_idx).map_err(|_| Error::Other("Internal error: geometry column index invalid".to_string()))?;
     let geom_col = unsafe { geom_col_robj.get() };
-    if unsafe { typeof_sexp(geom_col) } != VECSXP {
+    
+    // FIX: VECSXP check (SEXPTYPE::VECSXP)
+    if unsafe { typeof_sexp(geom_col) } != libR_sys::SEXPTYPE::VECSXP as u32 {
         return rerr("Not a valid sf object (Geometry column is not a list)");
     }
 

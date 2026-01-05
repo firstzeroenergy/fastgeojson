@@ -612,7 +612,7 @@ rectangular tabular objects (<code>data.frame</code>,
 objects.</p>
 <p>Implemented in Rust via the <strong>extendr</strong> framework, it
 uses parallel processing and low-level optimizations to deliver
-<strong>2.3–8× speedups</strong> over existing R solutions on large
+<strong>2.3–15× speedups</strong> over existing R solutions on large
 datasets.</p>
 <p>The resulting strings are ready for immediate use in web applications
 (Shiny, Plumber), direct integration with
@@ -639,23 +639,23 @@ serialization: 1 million rows × 4 mixed columns</h3>
 <tbody>
 <tr>
 <td align="left">jsonify</td>
-<td align="right">1904</td>
+<td align="right">1573</td>
 <td align="left">—</td>
 </tr>
 <tr>
 <td align="left">jsonlite</td>
-<td align="right">1443</td>
+<td align="right">1281</td>
 <td align="left">—</td>
 </tr>
 <tr>
 <td align="left">yyjsonr</td>
-<td align="right">236</td>
+<td align="right">235</td>
 <td align="left">1×</td>
 </tr>
 <tr>
 <td align="left">fastgeojson</td>
-<td align="right">102</td>
-<td align="left">2.3×</td>
+<td align="right">98</td>
+<td align="left">2.4×</td>
 </tr>
 </tbody>
 </table>
@@ -672,17 +672,17 @@ serialization: 1 million point features</h3>
 <tbody>
 <tr>
 <td align="left">geojsonsf</td>
-<td align="right">2065</td>
+<td align="right">1920</td>
 <td align="left">—</td>
 </tr>
 <tr>
 <td align="left">yyjsonr</td>
-<td align="right">585</td>
+<td align="right">586</td>
 <td align="left">1×</td>
 </tr>
 <tr>
 <td align="left">fastgeojson</td>
-<td align="right">233</td>
+<td align="right">238</td>
 <td align="left">2.5×</td>
 </tr>
 </tbody>

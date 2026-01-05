@@ -12,6 +12,10 @@ all: $(SHLIB)
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
+	# CRAN Requirement: Print Rust compiler version
+	rustc --version
+	cargo --version
+	
 	cargo build --release --lib \
 	  --manifest-path=rust/Cargo.toml \
 	  --target-dir $(TARGET_DIR)
