@@ -1,20 +1,13 @@
 #!/bin/sh
-set -e
+# configure: generate src/Makevars from src/Makevars.in
 
-UNAME_S=`uname -s 2>/dev/null || echo unknown`
+UNAME_S=`uname -s`
+DARWIN_LDFLAGS=""
 
-STRIP_FLAGS=""
-case "$UNAME_S" in
-  Darwin)
-    STRIP_FLAGS="-Wl,-dead_strip"
-    ;;
-  Linux)
-    STRIP_FLAGS="-Wl,--gc-sections"
-    ;;
-esac
+if [ "$UNAME_S" = "Darwin" ]; then
+  DARWIN_LDFLAGS="-Wl,-dead_strip"
+fi
 
-# Generate src/Makevars from template
-sed -e "s|@STRIP_FLAGS@|$STRIP_FLAGS|g" \
-  src/Makevars.in > src/Makevars
+sed "s|@DARWIN_LDFLAGS@|$DARWIN_LDFLAGS|g" src/Makevars.in > src/Makevars
 
 exit 0
