@@ -1,26 +1,31 @@
-# src/Makevars.in
+## ---- fastgeojson: src/Makevars.in ----
+## CRAN-safe Rust staticlib build via extendr
 
 TARGET_DIR = rust/target
 LIBDIR     = $(TARGET_DIR)/release
 STATLIB    = $(LIBDIR)/libfastgeojson.a
 
-PKG_LIBS   = -L$(LIBDIR) -lfastgeojson
+UNAME_S = $(shell uname -s)
 
-# macOS: strip dead code at link time (can help remove abort-related symbols)
-UNAME_S := $(shell uname -s)
+## macOS: strip unused code at link time (helps remove abort-related bits)
+DARWIN_LDFLAGS =
 ifeq ($(UNAME_S),Darwin)
-PKG_LIBS = $(PKG_LIBS) -Wl,-dead_strip
+DARWIN_LDFLAGS = -Wl,-dead_strip
 endif
+
+## Link against Rust staticlib
+PKG_LIBS = -L$(LIBDIR) -lfastgeojson $(DARWIN_LDFLAGS)
 
 all: $(SHLIB)
 
+## Ensure Rust static library exists before linking
 $(SHLIB): $(STATLIB)
 
+## ---- Build Rust staticlib ----
 $(STATLIB):
 	@echo "== fastgeojson: Rust toolchain =="
 	rustc --version
 	cargo --version
-
 	@echo "== fastgeojson: setup vendored deps =="
 	mkdir -p rust/.cargo
 	if [ -f rust/vendor.tar.xz ]; then \
@@ -30,19 +35,18 @@ $(STATLIB):
 		echo '[source.vendored-sources]' >> rust/.cargo/config.toml && \
 		echo 'directory = "vendor"' >> rust/.cargo/config.toml; \
 	fi
-
 	@echo "== fastgeojson: build Rust =="
 	export CARGO_HOME="$(CURDIR)/rust/.cargo" && \
 	if [ -f rust/vendor.tar.xz ]; then \
 		echo "Building OFFLINE..." && \
 		cargo build --release --lib --offline \
-		  --manifest-path=rust/Cargo.toml \
-		  --target-dir $(TARGET_DIR); \
+			--manifest-path=rust/Cargo.toml \
+			--target-dir $(TARGET_DIR); \
 	else \
 		echo "Building ONLINE..." && \
 		cargo build --release --lib \
-		  --manifest-path=rust/Cargo.toml \
-		  --target-dir $(TARGET_DIR); \
+			--manifest-path=rust/Cargo.toml \
+			--target-dir $(TARGET_DIR); \
 	fi
 
 clean:
