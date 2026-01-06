@@ -59,14 +59,12 @@ jobs:
           echo "SO=$SO"
 
           if [ -n "$SO" ]; then
-            echo "nm -gU fastgeojson.so | grep abort"
-            nm -gU "$SO" | grep -E "_abort|compilerrt_abort" || true
-          fi
+            echo "== nm (all symbols) =="
+            nm -a "$SO" | grep -E "(_abort|abort|compilerrt_abort)" || true
 
-      - name: Upload check results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: macOS-check-results
-          path: |
-            *.Rcheck
+            echo "== otool -Iv (imported symbols only) =="
+            otool -Iv "$SO" | grep -E "(_abort|abort|compilerrt_abort)" || true
+
+            echo "== strings (last resort) =="
+            strings "$SO" | grep -E "compilerrt_abort|___compilerrt_abort_impl|_abort" || true
+          fi
