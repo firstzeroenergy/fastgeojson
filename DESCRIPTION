@@ -6,16 +6,17 @@ Authors@R:
            family = "Jorion", 
            role = c("aut", "cre"), 
            email = "alex.jorion@firstzeroenergy.com")
-Description: Converts R data frames and 'sf' spatial objects into JSON and 
-    GeoJSON strings. The core encoders are implemented in Rust using the 
-    'extendr' framework and are designed to efficiently serialize large 
-    tabular and spatial datasets. Returns serialized JSON text, allowing 
-    applications such as 'shiny' or web APIs to transfer data to 
-    client-side JavaScript libraries without additional encoding overhead.
+Description: Tools for converting R data frames and 'sf' spatial objects
+    into JSON and GeoJSON strings. The core encoders are implemented in Rust
+    using the 'extendr' framework and are designed to efficiently serialize
+    large tabular and spatial datasets. The package returns pre-serialized
+    JSON text, allowing applications such as 'shiny' or web APIs to transfer
+    data to client-side JavaScript libraries without additional encoding
+    overhead.
 License: MIT + file LICENSE
 URL: https://github.com/firstzeroenergy/fastgeojson
 BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
-SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.75)
+SystemRequirements: Cargo (>= 1.54)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
