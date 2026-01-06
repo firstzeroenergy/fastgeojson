@@ -1,7 +1,9 @@
-^.*\.Rproj$
+^\.git$
+^\.gitignore$
+^\.github$
 ^\.Rproj\.user$
-^src/rust/target$
+^.*\.Rproj$
+^\.\.Rcheck$
 ^README\.Rmd$
 ^README\.html$
-^\.github$
 ^LICENSE\.md$

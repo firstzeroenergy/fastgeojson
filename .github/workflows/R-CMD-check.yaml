@@ -20,6 +20,10 @@ jobs:
       - name: Set up Pandoc
         uses: r-lib/actions/setup-pandoc@v2
 
+      # REQUIRED: fixes pdflatex ERROR
+      - name: Install TinyTeX (PDF manual)
+        uses: r-lib/actions/setup-tinytex@v2
+
       - name: Install system dependencies
         run: |
           brew update
@@ -31,12 +35,19 @@ jobs:
           extra-packages: any::rcmdcheck
           needs: check
 
+      # CRAN-style workflow: build first
+      - name: Build source tarball
+        run: |
+          R CMD build .
+
+      # CRAN-style check on tarball
       - name: Run R CMD check (as CRAN)
         env:
           _R_CHECK_CRAN_INCOMING_: false
         run: |
-          R CMD check --as-cran fastgeojson
+          R CMD check --as-cran fastgeojson_*.tar.gz
 
+      # ✅ KEEP THIS — diagnostic only
       - name: Diagnose abort symbols (macOS only)
         if: runner.os == 'macOS'
         run: |
@@ -58,5 +69,4 @@ jobs:
         with:
           name: macOS-check-results
           path: |
-            **/*.Rcheck/**
-            **/*.Rcheck/*
+            *.Rcheck
