@@ -48,68 +48,63 @@ jobs:
           R CMD check --as-cran fastgeojson_*.tar.gz
 
       # ✅ KEEP THIS — diagnostic only
-      - name: Diagnose _abort symbol provenance (macOS only)
+      - name: Diagnose abort symbols (macOS only)
         if: runner.os == 'macOS'
         run: |
           set -euxo pipefail
 
           echo "== Locate built shared object fastgeojson.so =="
-          find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' -print || true
-
-          SO="$(find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' | head -n 1 || true)"
+          find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' -print
+          SO=$(find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' | head -n 1 || true)
           echo "SO=$SO"
 
-          if [ -n "$SO" ]; then
-            echo "== nm -a (show abort-related symbols) =="
-            nm -a "$SO" | grep -E '(_abort|abort_internal|process5abort|compilerrt_abort|___compilerrt_abort_impl)' || true
-
-            echo "== otool -Iv (imported symbols only, abort-related) =="
-            otool -Iv "$SO" | grep -E '(_abort|compilerrt_abort|___compilerrt_abort_impl)' || true
-
-            echo "== Confirm whether _abort is imported (U) =="
-            nm -a "$SO" | grep -E ' U _abort' || true
+          if [ -z "$SO" ]; then
+            echo "No fastgeojson.so found; skipping diagnostics."
+            exit 0
           fi
+
+          echo "== Confirm whether _abort is imported (U) =="
+          nm -a "$SO" | grep -E ' U _abort' || true
+
+          echo "== otool -Iv (imported symbols only, abort-related) =="
+          otool -Iv "$SO" | grep -E '(_abort|compilerrt_abort|___compilerrt_abort_impl)' || true
 
           echo "== Locate Rust static archive libfastgeojson.a inside check tree =="
-          A="$(find . -path '*fastgeojson.Rcheck*' -name 'libfastgeojson.a' | head -n 1 || true)"
+          A=$(find . -path '*fastgeojson.Rcheck*' -name 'libfastgeojson.a' | head -n 1 || true)
           echo "A=$A"
 
-          if [ -n "$A" ]; then
-            echo "== Archive members (first 50) =="
-            ar -t "$A" | head -n 50 || true
-
-            echo "== Extract archive and find first object referencing U _abort =="
-            WORK="/tmp/arobjs"
-            rm -rf "$WORK"
-            mkdir -p "$WORK"
-            cd "$WORK"
-            ar -x "$A"
-
-            FOUND=""
-            for o in *.o; do
-              if nm -a "$o" | grep -q ' U _abort'; then
-                FOUND="$o"
-                break
-              fi
-            done
-
-            echo "FOUND_OBJECT=$FOUND"
-            if [ -n "$FOUND" ]; then
-              echo "== nm -a on offending object (abort-related lines) =="
-              nm -a "$FOUND" | grep -E '(_abort|abort_internal|process5abort|compilerrt_abort|___compilerrt_abort_impl)' || true
-
-              echo "== file type (sometimes reveals compiler_builtins vs std) =="
-              file "$FOUND" || true
-            else
-              echo "No object in libfastgeojson.a directly shows ' U _abort' (it may be pulled in later at final link)."
-            fi
+          if [ -z "$A" ]; then
+            echo "No libfastgeojson.a found; cannot trace which object brings in _abort."
+            exit 0
           fi
 
-      - name: Upload check results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: macOS-check-results
-          path: |
-            fastgeojson.Rcheck
-            *.Rcheck
+          # Make it absolute so we can cd safely
+          AABS="$(cd "$(dirname "$A")" && pwd)/$(basename "$A")"
+          echo "AABS=$AABS"
+          ls -l "$AABS"
+
+          echo "== Archive members (first 50) =="
+          ar -t "$AABS" | head -n 50
+
+          echo "== Extract archive and find first object referencing _abort =="
+          WORK="$(mktemp -d)"
+          echo "WORK=$WORK"
+          (cd "$WORK" && ar -x "$AABS")
+
+          FOUND=""
+          for o in "$WORK"/*.o; do
+            # Search for an undefined reference to _abort in the object
+            if nm -a "$o" 2>/dev/null | grep -qE ' U _abort'; then
+              echo "FOUND object referencing _abort: $(basename "$o")"
+              nm -a "$o" 2>/dev/null | grep -E ' U _abort' || true
+              FOUND="$o"
+              break
+            fi
+          done
+
+          if [ -n "$FOUND" ]; then
+            echo "== A bit more context (top abort-ish symbols in that object) =="
+            nm -a "$FOUND" 2>/dev/null | grep -E '(_abort|abort_internal|process5abort|compilerrt_abort|___compilerrt_abort_impl)' || true
+          else
+            echo "No single object showed ' U _abort' (it may be pulled via other link paths)."
+          fi
