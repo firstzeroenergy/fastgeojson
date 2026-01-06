@@ -1,27 +1,27 @@
 ## ---- fastgeojson: src/Makevars.in ----
-## CRAN-safe Rust staticlib build via extendr
+## Build Rust staticlib (via cargo) and link into the R shared library.
 
-TARGET_DIR = rust/target
-LIBDIR     = $(TARGET_DIR)/release
-STATLIB    = $(LIBDIR)/libfastgeojson.a
+TARGET_DIR := rust/target
+LIBDIR     := $(TARGET_DIR)/release
+STATLIB    := $(LIBDIR)/libfastgeojson.a
 
-UNAME_S = $(shell uname -s)
+UNAME_S    := $(shell uname -s)
 
-## macOS: strip unused code at link time (helps remove abort-related bits)
-DARWIN_LDFLAGS =
+## Base link flags: link against the Rust staticlib we build below
+PKG_LIBS   := -L$(LIBDIR) -lfastgeojson
+
+## macOS: dead_strip helps the linker drop unused runtime bits (often reduces "abort" symbol noise)
 ifeq ($(UNAME_S),Darwin)
-DARWIN_LDFLAGS = -Wl,-dead_strip
+PKG_LIBS   := $(PKG_LIBS) -Wl,-dead_strip
 endif
-
-## Link against Rust staticlib
-PKG_LIBS = -L$(LIBDIR) -lfastgeojson $(DARWIN_LDFLAGS)
 
 all: $(SHLIB)
 
-## Ensure Rust static library exists before linking
+## Ensure the Rust archive exists before linking the shared library
 $(SHLIB): $(STATLIB)
 
 ## ---- Build Rust staticlib ----
+## IMPORTANT: the command lines below MUST start with a real TAB character.
 $(STATLIB):
 	@echo "== fastgeojson: Rust toolchain =="
 	rustc --version
