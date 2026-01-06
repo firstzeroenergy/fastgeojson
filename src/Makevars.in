@@ -6,6 +6,12 @@ STATLIB    = $(LIBDIR)/libfastgeojson.a
 
 PKG_LIBS   = -L$(LIBDIR) -lfastgeojson
 
+# macOS: strip dead code at link time (can help remove abort-related symbols)
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+PKG_LIBS = $(PKG_LIBS) -Wl,-dead_strip
+endif
+
 all: $(SHLIB)
 
 $(SHLIB): $(STATLIB)
