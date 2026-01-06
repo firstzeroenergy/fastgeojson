@@ -1,4 +1,0 @@
-# src/Makevars.linux
-# Linux-only linker flags: garbage-collect unused sections
-
-PKG_LIBS = $(PKG_LIBS) -Wl,--gc-sections

@@ -1,2 +1,0 @@
-PKG_LIBS = $(PKG_LIBS) -Wl,-dead_strip
-RUSTFLAGS = $(RUSTFLAGS) -C link-arg=-Wl,-dead_strip

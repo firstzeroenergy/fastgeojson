@@ -13,26 +13,45 @@ all: $(SHLIB)
 
 $(SHLIB): $(STATLIB)
 
-CARGOTMP = $(CURDIR)/.cargo
-
 $(STATLIB):
-	# CRAN requirement: print compiler versions
+	# 1. Print Debug Info
 	rustc --version
 	cargo --version
 
-	# libgcc mock required for static Rust libs on Windows
+	# 2. Prepare Windows Linker Mock
 	mkdir -p $(TARGET_DIR)/libgcc_mock
 	touch $(TARGET_DIR)/libgcc_mock/libgcc_eh.a
 
-	# Build Rust (ONLINE – no --offline)
-	export CARGO_HOME=$(CARGOTMP) && \
-	export LIBRARY_PATH="$(LIBRARY_PATH);$(CURDIR)/$(TARGET_DIR)/libgcc_mock" && \
-	RUSTFLAGS="$(RUSTFLAGS) --print=native-static-libs" \
-	cargo build --target=$(TARGET) --lib --release \
-	  --manifest-path=rust/Cargo.toml \
-	  --target-dir=$(TARGET_DIR)
+	# 3. Setup Vendor (OFFLINE MODE)
+	# FIX: Extract to 'rust' so it creates 'rust/vendor' (Where Cargo is looking)
+	# We still create .cargo to hold the config file.
+	mkdir -p rust/.cargo
+	if [ -f "rust/vendor.tar.xz" ]; then \
+		tar xf "rust/vendor.tar.xz" -C "rust" && \
+		echo '[source.crates-io]' > rust/.cargo/config.toml && \
+		echo 'replace-with = "vendored-sources"' >> rust/.cargo/config.toml && \
+		echo '[source.vendored-sources]' >> rust/.cargo/config.toml && \
+		echo 'directory = "vendor"' >> rust/.cargo/config.toml; \
+	fi
 
-	rm -rf $(CARGOTMP)
+	# 4. Build
+	# We set CARGO_HOME to rust/.cargo so it finds the config file.
+	# But based on your logs, 'directory="vendor"' resolves relative to the project root,
+	# so it will correctly find 'rust/vendor'.
+	export LIBRARY_PATH="$(LIBRARY_PATH);$(CURDIR)/$(TARGET_DIR)/libgcc_mock" && \
+	export RUSTFLAGS="$(RUSTFLAGS) --print=native-static-libs" && \
+	export CARGO_HOME="$(CURDIR)/rust/.cargo" && \
+	if [ -f "rust/vendor.tar.xz" ]; then \
+		echo "Building OFFLINE (Windows)..." && \
+		cargo build --target=$(TARGET) --lib --release --offline \
+		  --manifest-path=rust/Cargo.toml \
+		  --target-dir=$(TARGET_DIR); \
+	else \
+		echo "Building ONLINE (Windows)..." && \
+		cargo build --target=$(TARGET) --lib --release \
+		  --manifest-path=rust/Cargo.toml \
+		  --target-dir=$(TARGET_DIR); \
+	fi
 
 clean:
-	rm -rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)
+	rm -rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) rust/.cargo rust/vendor

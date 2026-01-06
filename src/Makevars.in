@@ -1,0 +1,44 @@
+# src/Makevars.in
+
+TARGET_DIR = rust/target
+LIBDIR     = $(TARGET_DIR)/release
+STATLIB    = $(LIBDIR)/libfastgeojson.a
+
+PKG_LIBS   = -L$(LIBDIR) -lfastgeojson
+
+all: $(SHLIB)
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	@echo "== fastgeojson: Rust toolchain =="
+	rustc --version
+	cargo --version
+
+	@echo "== fastgeojson: setup vendored deps =="
+	mkdir -p rust/.cargo
+	if [ -f rust/vendor.tar.xz ]; then \
+		tar xf rust/vendor.tar.xz -C rust && \
+		echo '[source.crates-io]' > rust/.cargo/config.toml && \
+		echo 'replace-with = "vendored-sources"' >> rust/.cargo/config.toml && \
+		echo '[source.vendored-sources]' >> rust/.cargo/config.toml && \
+		echo 'directory = "vendor"' >> rust/.cargo/config.toml; \
+	fi
+
+	@echo "== fastgeojson: build Rust =="
+	export CARGO_HOME="$(CURDIR)/rust/.cargo" && \
+	if [ -f rust/vendor.tar.xz ]; then \
+		echo "Building OFFLINE..." && \
+		cargo build --release --lib --offline \
+		  --manifest-path=rust/Cargo.toml \
+		  --target-dir $(TARGET_DIR); \
+	else \
+		echo "Building ONLINE..." && \
+		cargo build --release --lib \
+		  --manifest-path=rust/Cargo.toml \
+		  --target-dir $(TARGET_DIR); \
+	fi
+
+clean:
+	rm -f $(SHLIB) $(OBJECTS)
+	rm -rf $(TARGET_DIR) rust/.cargo rust/vendor

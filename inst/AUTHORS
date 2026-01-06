@@ -1,0 +1,10 @@
+The Rust dependencies in this package are vendored to allow offline compilation.
+Full license texts are included in the 'src/rust/vendor' directory inside the source tarball.
+
+Summary of licenses for direct dependencies:
+- extendr-api, extendr-ffi: MIT
+- rayon, rayon-core: MIT or Apache-2.0
+- itoa: MIT or Apache-2.0
+- ryu: Apache-2.0 or BSL-1.0
+
+Most transitive dependencies are licensed under MIT or Apache-2.0.
