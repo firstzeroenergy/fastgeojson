@@ -50,61 +50,68 @@ jobs:
       # ✅ KEEP THIS — diagnostic only
       - name: Diagnose abort symbols (macOS only)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euxo pipefail
 
-          echo "== Locate built shared object fastgeojson.so =="
-          find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' -print
-          SO=$(find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' | head -n 1 || true)
+          echo '== Locate built shared object fastgeojson.so =='
+          find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' -print || true
+
+          SO="$(find . -path '*fastgeojson.Rcheck*' -path '*libs*' -name 'fastgeojson.so' | head -n 1 || true)"
           echo "SO=$SO"
 
           if [ -z "$SO" ]; then
-            echo "No fastgeojson.so found; skipping diagnostics."
+            echo "No fastgeojson.so found; skipping."
             exit 0
           fi
 
-          echo "== Confirm whether _abort is imported (U) =="
-          nm -a "$SO" | grep -E ' U _abort' || true
+          echo '== Confirm whether _abort is imported (U) =='
+          nm -a "$SO" | grep -E '^[[:space:]]*U[[:space:]]+_abort$' || true
 
-          echo "== otool -Iv (imported symbols only, abort-related) =="
+          echo '== otool -Iv (imported symbols only, abort-related) =='
           otool -Iv "$SO" | grep -E '(_abort|compilerrt_abort|___compilerrt_abort_impl)' || true
 
-          echo "== Locate Rust static archive libfastgeojson.a inside check tree =="
-          A=$(find . -path '*fastgeojson.Rcheck*' -name 'libfastgeojson.a' | head -n 1 || true)
+          echo '== Locate Rust static archive libfastgeojson.a inside check tree =='
+          A="$(find . -path '*fastgeojson.Rcheck*' -name 'libfastgeojson.a' | head -n 1 || true)"
           echo "A=$A"
 
           if [ -z "$A" ]; then
-            echo "No libfastgeojson.a found; cannot trace which object brings in _abort."
+            echo "No libfastgeojson.a found; skipping archive scan."
             exit 0
           fi
 
-          # Make it absolute so we can cd safely
+          # Convert to absolute path (so it still works after cd)
           AABS="$(cd "$(dirname "$A")" && pwd)/$(basename "$A")"
           echo "AABS=$AABS"
           ls -l "$AABS"
 
-          echo "== Archive members (first 50) =="
-          ar -t "$AABS" | head -n 50
+          echo '== Archive members (first 50) =='
+          ar -t "$AABS" | head -n 50 || true
 
-          echo "== Extract archive and find first object referencing _abort =="
+          echo '== Extract archive and find first object referencing _abort =='
           WORK="$(mktemp -d)"
           echo "WORK=$WORK"
-          (cd "$WORK" && ar -x "$AABS")
+          cd "$WORK"
+          ar -x "$AABS"
 
           FOUND=""
           for o in "$WORK"/*.o; do
-            # Search for an undefined reference to _abort in the object
-            if nm -a "$o" 2>/dev/null | grep -qE ' U _abort'; then
-              echo "FOUND object referencing _abort: $(basename "$o")"
-              nm -a "$o" 2>/dev/null | grep -E ' U _abort' || true
+            # nm output spacing varies; use whitespace-tolerant regex
+            if nm -u "$o" 2>/dev/null | grep -qE '^[[:space:]]*U[[:space:]]+_abort$'; then
+              echo "FOUND: $(basename "$o") references _abort"
+              nm -u "$o" 2>/dev/null | grep -E '^[[:space:]]*U[[:space:]]+_abort$' || true
               FOUND="$o"
               break
             fi
           done
 
-          if [ -n "$FOUND" ]; then
-            echo "== A bit more context (top abort-ish symbols in that object) =="
-            nm -a "$FOUND" 2>/dev/null | grep -E '(_abort|abort_internal|process5abort|compilerrt_abort|___compilerrt_abort_impl)' || true
-          else
-            echo "No single object showed ' U _abort' (it may be pulled via other link paths)."
+          if [ -z "$FOUND" ]; then
+            echo "No single object showed 'U _abort' via nm -u."
+            echo "Next: list any abort-related symbols we can see in objects (sample):"
+            for o in "$WORK"/*.o; do
+              if nm -a "$o" 2>/dev/null | grep -qE '(_abort$|abort_internal|process5abort|compilerrt_abort|abort_impl)'; then
+                echo "---- $(basename "$o") ----"
+                nm -a "$o" 2>/dev/null | grep -E '(_abort$|abort_internal|process5abort|compilerrt_abort|abort_impl)' | head -n 20 || true
+              fi
+            done | head -n 200 || true
           fi
