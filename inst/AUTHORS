@@ -1,10 +1,28 @@
-The Rust dependencies in this package are vendored to allow offline compilation.
-Full license texts are included in the 'src/rust/vendor' directory inside the source tarball.
+The authors of the dependency Rust crates:
 
-Summary of licenses for direct dependencies:
-- extendr-api, extendr-ffi: MIT
-- rayon, rayon-core: MIT or Apache-2.0
-- itoa: MIT or Apache-2.0
-- ryu: Apache-2.0 or BSL-1.0
+extendr-api:
+  The extendr Project Developers
+  (including Andy Thomason, Claus O. Wilke, Mossa M. Reimert,
+   Ilia Kosenkov, Malcolm Barrett, and contributors)
 
-Most transitive dependencies are licensed under MIT or Apache-2.0.
+extendr-ffi:
+  The extendr Project Developers
+  (including Andy Thomason, Claus O. Wilke, Mossa M. Reimert,
+   Ilia Kosenkov, Malcolm Barrett, and contributors)
+
+itoa:
+  David Tolnay
+
+ryu:
+  Ulf Adams
+  David Tolnay
+  Reini Urban
+  Other contributors
+
+rayon:
+  The Rayon Project Developers
+  (including Niko Matsakis and contributors)
+
+rayon-core:
+  The Rayon Project Developers
+  (including Niko Matsakis and contributors)

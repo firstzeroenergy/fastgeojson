@@ -1,72 +1,25 @@
-\## Test environments
+## Test environments
+* local Windows 11 install, R 4.5.2
+* R-universe (Ubuntu 22.04, Windows Server 2022, macOS Sequoia)
+* win-builder (devel and release)
+* R-hub (macOS-arm64, Ubuntu-latest)
+* GitHub Actions (macos-latest, ubuntu-latest, windows-latest)
 
-\* local Windows 11 install, R 4.5.0
+## R CMD check results
 
-\* R-universe (Windows, Mac, Linux)
+On Windows and older Linux (R-universe, win-builder, GHA oldrel):
+0 errors | 0 warnings | 1 notes
 
-\* win-builder (devel and release)
+On MacOS and modern Linux (R-hub, GHA devel/release):
+0 errors | 1 warning | 0 notes
 
+### Explanations
 
+1.  **WARNING (MacOS/Linux):** Found ‘_abort’, possibly from ‘abort’ (C).
+    * This is a known false positive for Rust-based packages on modern toolchains. The symbol arises from the Rust standard library's panic handler fallback (`compiler_builtins`) during linking. The package is configured with `panic = "unwind"` in Cargo.toml and does not call abort() directly. The symbol is dead code that the linker did not strip in these specific environments.
 
-\## R CMD check results
+2.  **NOTE:** Possibly misspelled words in DESCRIPTION: 'GeoJSON'
+    * 'GeoJSON' is the correct capitalization.
 
-0 errors | 0 warnings | 1 note
-
-
-
-1\. New submission
-
-2\. Possibly misspelled words in DESCRIPTION: 'GeoJSON'
-
-&nbsp;  \* 'GeoJSON' is the correct capitalization for the geospatial data interchange format.
-
-
-
-\## Compiled code note: `\_abort` symbol (macOS only)
-
-
-
-This package includes Rust code via the `extendr` interface, which builds
-
-a static library (`libfastgeojson.a`) that is linked into the final
-
-shared object.
-
-
-
-On \*\*macOS only\*\*, R CMD check reports that the compiled library contains
-
-references to `\_abort`. Investigation shows these originate from Rust’s
-
-LLVM `compiler\_builtins` runtime — not from any function exported to R.
-
-
-
-No `\_abort` or `panic!()` paths are invoked by package code. Rust
-
-functions exported to R:
-
-
-
-\* use `panic = "unwind"` to prevent panics escaping the FFI boundary
-
-\* do not call `abort()` explicitly
-
-\* are linked with `-Wl,-dead\_strip` to remove unused code on macOS
-
-
-
-The symbol persists only as \*\*unreferenced toolchain support code\*\*, and
-
-does not execute in practice. This warning does \*\*not\*\* appear on Linux
-
-or Windows builds.
-
-
-
-\## Downstream dependencies
-
-
-
-None — this is a new submission.
-
+## Downstream dependencies
+There are currently no downstream dependencies for this package.

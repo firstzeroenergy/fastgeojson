@@ -1,0 +1,57 @@
+This package contains the Rust source code of the dependencies in src/rust/vendor.tar.xz.
+The authorships and the licenses are listed below. In summary, all libraries are
+distributed either under the MIT license, under an MIT/Apache-2.0 dual license,
+or under an Apache-2.0/Boost Software License 1.0 dual license (see ryu).
+
+Note that, when Cargo (Rust’s build system and package manager) is not installed
+on the machine, a pre-compiled binary may be used when building this package.
+The binary is compiled from the same Rust sources, so the authorships and
+licenses are the same as listed here.
+
+===============================
+
+------------------------------
+
+Name:    extendr-api
+Files:   vendor/extendr-api/*
+Authors: extendr developers (including Andy Thomason, Claus O. Wilke,
+         Mossa M. Reimert, Ilia Kosenkov, Malcolm Barrett, and contributors)
+License: MIT
+
+------------------------------
+
+Name:    extendr-ffi
+Files:   vendor/extendr-ffi/*
+Authors: extendr developers (including Andy Thomason, Claus O. Wilke,
+         Mossa M. Reimert, Ilia Kosenkov, Malcolm Barrett, and contributors)
+License: MIT
+
+------------------------------
+
+Name:    itoa
+Files:   vendor/itoa/*
+Authors: David Tolnay
+License: Apache-2.0 OR MIT
+
+------------------------------
+
+Name:    ryu
+Files:   vendor/ryu/*
+Authors: Ulf Adams, David Tolnay, and contributors
+License: Apache-2.0 OR BSL-1.0
+
+------------------------------
+
+Name:    rayon
+Files:   vendor/rayon/*
+Authors: Niko Matsakis and Rayon project contributors
+License: MIT OR Apache-2.0
+
+------------------------------
+
+Name:    rayon-core
+Files:   vendor/rayon-core/*
+Authors: Niko Matsakis and Rayon project contributors
+License: MIT OR Apache-2.0
+
+------------------------------
