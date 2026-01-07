@@ -1,8 +1,10 @@
 Package: fastgeojson
 Title: High-Performance GeoJSON and JSON Serialization for R
 Version: 0.1.1
-Author: Alex Jorion [aut, cre]
-Maintainer: Alex Jorion <alex.jorion@firstzeroenergy.com>
+Authors@R: person(given = "Alex",
+                    family = "Jorion",
+                    role = c("aut", "cre"),
+                    email = "alex.jorion@firstzeroenergy.com")
 Description: Converts R data frames and 'sf' spatial objects into JSON and 
     GeoJSON strings. The core encoders are implemented in Rust using the 
     'extendr' framework and are designed to efficiently serialize large 
