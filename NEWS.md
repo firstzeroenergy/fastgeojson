@@ -1,7 +1,7 @@
 # fastgeojson 0.1.1
 
 * **Build Stability:** Pinned the compilation environment to **Rust 1.75** via `rust-toolchain.toml`. This ensures strictly reproducible builds and maximizes compatibility with deployment servers like `shinyapps.io` and Posit Connect.
-* **Documentation:** Added a "Deploying to shinyapps.io" guide to the README, detailing the necessary `.Rprofile` repository configuration.
+* **Documentation:** Added a "Deploying to shinyapps.io" guide to the README.
 
 # fastgeojson 0.1.0
 
