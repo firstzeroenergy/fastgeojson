@@ -16,7 +16,7 @@ The resulting strings are ready for immediate use in web applications
 (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and
 other R packages that interface with JavaScript.
 
-> **Status: v0.1.1** — Stable for production use and compatible with
+> **Status: v0.1.2** — Stable for production use and compatible with
 > `shinyapps.io`. This is an early release of `fastgeojson`, so we are
 > actively looking for edge cases; bug reports and feature requests are
 > very welcome.

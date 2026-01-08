@@ -1,6 +1,6 @@
 Package: fastgeojson
 Title: High-Performance GeoJSON and JSON Serialization for R
-Version: 0.1.1
+Version: 0.1.2
 Authors@R: 
     c(person(given = "Alex",
              family = "Jorion",

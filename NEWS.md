@@ -1,3 +1,8 @@
+# fastgeojson 0.1.2
+
+* Fixed `_abort` symbol warnings on macOS and Linux by implementing proper Rust build artifact cleanup.
+* Achieved clean compilation (0 warnings) across Windows, macOS, and Linux.
+
 # fastgeojson 0.1.1
 
 * **Build Stability:** Pinned the compilation environment to **Rust 1.75** via `rust-toolchain.toml`. This ensures strictly reproducible builds and maximizes compatibility with deployment servers like `shinyapps.io` and Posit Connect.
