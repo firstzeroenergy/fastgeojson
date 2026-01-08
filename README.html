@@ -612,16 +612,17 @@ rectangular tabular objects (<code>data.frame</code>,
 objects.</p>
 <p>Implemented in Rust via the <strong>extendr</strong> framework, it
 uses parallel processing and low-level optimizations to deliver
-<strong>2.3–15× speedups</strong> over existing R solutions on large
+<strong>2.4–16× speedups</strong> over existing R solutions on large
 datasets.</p>
 <p>The resulting strings are ready for immediate use in web applications
 (Shiny, Plumber), direct integration with
 <code>leaflet::addGeoJSON()</code>, and other R packages that interface
 with JavaScript.</p>
 <blockquote>
-<p><strong>Status: v0.1.1 (Beta)</strong> — Stable for production use
-via R-universe. Builds are reproducible and compatible with
-<code>shinyapps.io</code> and Linux environments.</p>
+<p><strong>Status: v0.1.1</strong> — Stable for production use and
+compatible with <code>shinyapps.io</code>. This is an early release of
+<code>fastgeojson</code>, so we are actively looking for edge cases; bug
+reports and feature requests are very welcome.</p>
 </blockquote>
 <h2 id="performance-benchmarks">Performance Benchmarks</h2>
 <p>Benchmarks conducted with <code>microbenchmark</code> (times in
@@ -688,33 +689,32 @@ serialization: 1 million point features</h3>
 </tbody>
 </table>
 <h2 id="installation">Installation</h2>
-<p>You can install the package directly from our R-universe repository.
-This provides pre-compiled binaries for Windows/macOS (no Rust required)
-and source packages for Linux.</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># 1. Enable the repository</span></span>
-<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
-<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
-<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
-<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>))</span>
-<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a></span>
-<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="co"># 2. Install</span></span>
-<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
-<h2 id="deploying-to-shinyappsio">Deploying to shinyapps.io</h2>
-<p>If you use <code>fastgeojson</code> in a Shiny app and deploy to
-<strong>shinyapps.io</strong> or <strong>Posit Connect</strong>, you
-<strong>must</strong> specify the repository URL in your project’s
-<code>.Rprofile</code>.</p>
-<p>Without this, the deployment server will fail with an <em>“Unknown
-repository”</em> error because it does not know where to download this
-package.</p>
-<p><strong>The Fix:</strong> Create a file named <code>.Rprofile</code>
-in your app’s root directory with the following content:</p>
+<h3 id="from-cran-recommended">From CRAN (Recommended)</h3>
+<p>Once available on CRAN, you can install the stable version
+directly:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
+<h3 id="development-version-r-universe">Development Version
+(R-universe)</h3>
+<p>To install the latest development version or pre-compiled binaries
+for Windows/macOS (no Rust required) before the CRAN release:</p>
 <div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
 <span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
 <span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
-<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>))</span></code></pre></div>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>))</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
+<h2 id="deploying-to-shinyappsio">Deploying to shinyapps.io</h2>
+<p><strong>Note:</strong> If you are using the CRAN version, deployment
+works automatically.</p>
+<p>If you are using the <strong>development version</strong> from
+R-universe, you must tell shinyapps.io where to find the package.
+<strong>The Fix:</strong> Add the following lines to the very top of
+your <code>app.R</code> (or <code>global.R</code>) file.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>))</span></code></pre></div>
 <p>This ensures the build server can find and install
-<code>fastgeojson</code> automatically.</p>
+<code>fastgeojson</code> from the custom repository.</p>
 <h2 id="main-features-of-the-rust-implementation">Main Features of the
 Rust Implementation</h2>
 <p>The core performance advantages come from a carefully designed Rust
@@ -748,14 +748,14 @@ R’s data model.</p>
 <p>Because <code>fastgeojson</code> returns pre-classed
 <code>json</code> strings, you can bypass R’s internal serialization
 when sending data to the browser.</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="co"># FAST: Direct handoff to Leaflet or deck.gl</span></span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a><span class="fu">observe</span>({</span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="co"># fastgeojson serializes in Rust</span></span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  json_data <span class="ot">&lt;-</span> <span class="fu">sf_geojson_str</span>(large_sf_object)</span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  </span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="co"># Sent directly to client without re-encoding</span></span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  session<span class="sc">$</span><span class="fu">sendCustomMessage</span>(<span class="st">&quot;updateMap&quot;</span>, json_data)</span>
-<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>})</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="co"># FAST: Direct handoff to Leaflet or deck.gl</span></span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">observe</span>({</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="co"># fastgeojson serializes in Rust</span></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  json_data <span class="ot">&lt;-</span> <span class="fu">sf_geojson_str</span>(large_sf_object)</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  </span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="co"># Sent directly to client without re-encoding</span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  session<span class="sc">$</span><span class="fu">sendCustomMessage</span>(<span class="st">&quot;updateMap&quot;</span>, json_data)</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>})</span></code></pre></div>
 <h2 id="key-functions">Key Functions</h2>
 <ul>
 <li><code>sf_geojson_str(x)</code> → GeoJSON FeatureCollection string
@@ -768,49 +768,71 @@ validation.</p>
 <h2 id="usage-examples">Usage Examples</h2>
 <h3 id="converting-sf-to-geojson">Converting <code>sf</code> to
 GeoJSON</h3>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">library</span>(sf)</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a></span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>nc <span class="ot">&lt;-</span> <span class="fu">st_read</span>(<span class="fu">system.file</span>(<span class="st">&quot;shape/nc.shp&quot;</span>, <span class="at">package =</span> <span class="st">&quot;sf&quot;</span>), <span class="at">quiet =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a></span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>geojson <span class="ot">&lt;-</span> <span class="fu">sf_geojson_str</span>(nc)</span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a></span>
-<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a><span class="fu">class</span>(geojson)</span>
-<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a><span class="co">#&gt; [1] &quot;geojson&quot; &quot;json&quot;</span></span>
-<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a></span>
-<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a><span class="fu">cat</span>(<span class="fu">substr</span>(geojson, <span class="dv">1</span>, <span class="dv">120</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">library</span>(sf)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>nc <span class="ot">&lt;-</span> <span class="fu">st_read</span>(<span class="fu">system.file</span>(<span class="st">&quot;shape/nc.shp&quot;</span>, <span class="at">package =</span> <span class="st">&quot;sf&quot;</span>), <span class="at">quiet =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a></span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>geojson <span class="ot">&lt;-</span> <span class="fu">sf_geojson_str</span>(nc)</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a></span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a><span class="fu">class</span>(geojson)</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a><span class="co">#&gt; [1] &quot;geojson&quot; &quot;json&quot;</span></span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a><span class="fu">cat</span>(<span class="fu">substr</span>(geojson, <span class="dv">1</span>, <span class="dv">120</span>))</span></code></pre></div>
 <p>Direct use in Leaflet:</p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">library</span>(leaflet)</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a></span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a><span class="fu">leaflet</span>() <span class="sc">%&gt;%</span></span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="fu">addTiles</span>() <span class="sc">%&gt;%</span></span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="fu">addGeoJSON</span>(geojson, <span class="at">fillOpacity =</span> <span class="fl">0.6</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">library</span>(leaflet)</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a></span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a><span class="fu">leaflet</span>() <span class="sc">%&gt;%</span></span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="fu">addTiles</span>() <span class="sc">%&gt;%</span></span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="fu">addGeoJSON</span>(geojson, <span class="at">fillOpacity =</span> <span class="fl">0.6</span>)</span></code></pre></div>
 <h3 id="converting-tabular-data-to-json">Converting tabular data to
 JSON</h3>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a></span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">id =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>,</span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">name =</span> <span class="fu">c</span>(<span class="st">&quot;Alice&quot;</span>, <span class="st">&quot;Bob&quot;</span>, <span class="st">&quot;Charlie&quot;</span>),</span>
-<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">value =</span> <span class="fu">c</span>(<span class="fl">10.5</span>, <span class="fl">20.1</span>, <span class="cn">NA</span>),</span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">active =</span> <span class="fu">c</span>(<span class="cn">TRUE</span>, <span class="cn">FALSE</span>, <span class="cn">TRUE</span>),</span>
-<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>  <span class="at">stringsAsFactors =</span> <span class="cn">FALSE</span></span>
-<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a>)</span>
-<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a></span>
-<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>json <span class="ot">&lt;-</span> <span class="fu">df_json_str</span>(df)</span>
-<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a></span>
-<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a><span class="fu">class</span>(json)</span>
-<span id="cb6-14"><a href="#cb6-14" tabindex="-1"></a><span class="co">#&gt; [1] &quot;json&quot;</span></span>
-<span id="cb6-15"><a href="#cb6-15" tabindex="-1"></a></span>
-<span id="cb6-16"><a href="#cb6-16" tabindex="-1"></a><span class="fu">cat</span>(<span class="fu">substr</span>(json, <span class="dv">1</span>, <span class="dv">120</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a></span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">id =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">name =</span> <span class="fu">c</span>(<span class="st">&quot;Alice&quot;</span>, <span class="st">&quot;Bob&quot;</span>, <span class="st">&quot;Charlie&quot;</span>),</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="at">value =</span> <span class="fu">c</span>(<span class="fl">10.5</span>, <span class="fl">20.1</span>, <span class="cn">NA</span>),</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="at">active =</span> <span class="fu">c</span>(<span class="cn">TRUE</span>, <span class="cn">FALSE</span>, <span class="cn">TRUE</span>),</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>  <span class="at">stringsAsFactors =</span> <span class="cn">FALSE</span></span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a>)</span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a></span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a>json <span class="ot">&lt;-</span> <span class="fu">df_json_str</span>(df)</span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a></span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a><span class="fu">class</span>(json)</span>
+<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a><span class="co">#&gt; [1] &quot;json&quot;</span></span>
+<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a></span>
+<span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a><span class="fu">cat</span>(<span class="fu">substr</span>(json, <span class="dv">1</span>, <span class="dv">120</span>))</span></code></pre></div>
 <h2 id="supported-features">Supported Features</h2>
 <ul>
 <li>Column types: integer, double, logical, character, factor</li>
+<li>Dates / POSIXct: Serialized as seconds since Epoch (1970-01-01)</li>
 <li>Missing values: <code>NA</code> in properties omitted for compact
 output</li>
 <li>Geometries: POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON,
 MULTIPOLYGON</li>
 <li>Mixed geometry collections fully supported</li>
+</ul>
+<h2 id="known-limitations">Known Limitations</h2>
+<p>To prioritize stability and speed, the following complex types are
+currently not supported. Future updates may introduce support for these
+types, provided they do not compromise encoding performance.</p>
+<ul>
+<li><p>List-Columns: Columns containing nested lists (e.g.,
+<code>c(&quot;tag1&quot;, &quot;tag2&quot;)</code> inside a cell) are omitted from the
+output.</p>
+<ul>
+<li><em>Workaround:</em> Flatten list columns into strings before
+conversion.</li>
+</ul>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>df<span class="sc">$</span>tags <span class="ot">&lt;-</span> <span class="fu">sapply</span>(df<span class="sc">$</span>tags, paste, <span class="at">collapse =</span> <span class="st">&quot;, &quot;</span>)</span></code></pre></div></li>
+<li><p>POSIXlt: The <code>POSIXlt</code> format is not supported due to
+its underlying list-based structure.</p>
+<ul>
+<li><em>Workaround:</em> Convert to standard <code>POSIXct</code> or
+Character.</li>
+</ul>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>df<span class="sc">$</span>time_col <span class="ot">&lt;-</span> <span class="fu">as.POSIXct</span>(df<span class="sc">$</span>time_col)</span></code></pre></div></li>
 </ul>
 <h2 id="development">Development</h2>
 <ul>

@@ -9,16 +9,17 @@ GeoJSON FeatureCollection strings and rectangular tabular objects
 (`data.frame`, `data.table`, `tibble`) to JSON arrays of row objects.
 
 Implemented in Rust via the **extendr** framework, it uses parallel
-processing and low-level optimizations to deliver **2.3–15× speedups**
+processing and low-level optimizations to deliver **2.4–16× speedups**
 over existing R solutions on large datasets.
 
 The resulting strings are ready for immediate use in web applications
 (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and
 other R packages that interface with JavaScript.
 
-> **Status: v0.1.1 (Beta)** — Stable for production use via R-universe.
-> Builds are reproducible and compatible with `shinyapps.io` and Linux
-> environments.
+> **Status: v0.1.1** — Stable for production use and compatible with
+> `shinyapps.io`. This is an early release of `fastgeojson`, so we are
+> actively looking for edge cases; bug reports and feature requests are
+> very welcome.
 
 ## Performance Benchmarks
 
@@ -44,33 +45,35 @@ is better).
 
 ## Installation
 
-You can install the package directly from our R-universe repository.
-This provides pre-compiled binaries for Windows/macOS (no Rust required)
-and source packages for Linux.
+### From CRAN (Recommended)
+
+Once available on CRAN, you can install the stable version directly:
 
 ``` r
-# 1. Enable the repository
+install.packages("fastgeojson")
+```
+
+### Development Version (R-universe)
+
+To install the latest development version or pre-compiled binaries for
+Windows/macOS (no Rust required) before the CRAN release:
+
+``` r
 options(repos = c(
   firstzero = "https://firstzeroenergy.r-universe.dev",
   CRAN = "https://cloud.r-project.org"
 ))
-
-# 2. Install
 install.packages("fastgeojson")
 ```
 
 ## Deploying to shinyapps.io
 
-If you use `fastgeojson` in a Shiny app and deploy to **shinyapps.io**
-or **Posit Connect**, you **must** specify the repository URL in your
-project’s `.Rprofile`.
+**Note:** If you are using the CRAN version, deployment works
+automatically.
 
-Without this, the deployment server will fail with an *“Unknown
-repository”* error because it does not know where to download this
-package.
-
-**The Fix:** Create a file named `.Rprofile` in your app’s root
-directory with the following content:
+If you are using the **development version** from R-universe, you must
+tell shinyapps.io where to find the package. **The Fix:** Add the
+following lines to the very top of your `app.R` (or `global.R`) file.
 
 ``` r
 options(repos = c(
@@ -79,8 +82,8 @@ options(repos = c(
 ))
 ```
 
-This ensures the build server can find and install `fastgeojson`
-automatically.
+This ensures the build server can find and install `fastgeojson` from
+the custom repository.
 
 ## Main Features of the Rust Implementation
 
@@ -186,10 +189,32 @@ cat(substr(json, 1, 120))
 ## Supported Features
 
 - Column types: integer, double, logical, character, factor
+- Dates / POSIXct: Serialized as seconds since Epoch (1970-01-01)
 - Missing values: `NA` in properties omitted for compact output
 - Geometries: POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON,
   MULTIPOLYGON
 - Mixed geometry collections fully supported
+
+## Known Limitations
+
+To prioritize stability and speed, the following complex types are
+currently not supported. Future updates may introduce support for these
+types, provided they do not compromise encoding performance.
+
+- List-Columns: Columns containing nested lists (e.g.,
+  `c("tag1", "tag2")` inside a cell) are omitted from the output.
+  - *Workaround:* Flatten list columns into strings before conversion.
+
+  ``` r
+  df$tags <- sapply(df$tags, paste, collapse = ", ")
+  ```
+- POSIXlt: The `POSIXlt` format is not supported due to its underlying
+  list-based structure.
+  - *Workaround:* Convert to standard `POSIXct` or Character.
+
+  ``` r
+  df$time_col <- as.POSIXct(df$time_col)
+  ```
 
 ## Development
 
