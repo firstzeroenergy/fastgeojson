@@ -8,7 +8,9 @@ STATLIB    = $(LIBDIR)/libfastgeojson.a
 ## PKG_LIBS gets the platform-specific extra flags via configure substitution
 PKG_LIBS   = -L$(LIBDIR) -lfastgeojson @DARWIN_LDFLAGS@
 
-all: $(SHLIB)
+# --- CHANGE 1: Add clean_rust to the 'all' target ---
+.PHONY: clean_rust
+all: $(SHLIB) clean_rust
 
 ## Ensure Rust static library exists before linking
 $(SHLIB): $(STATLIB)
@@ -41,6 +43,10 @@ $(STATLIB):
 			--manifest-path=rust/Cargo.toml \
 			--target-dir $(TARGET_DIR); \
 	fi
+
+# --- CHANGE 2: Add the cleanup step ---
+clean_rust:
+	rm -rf $(TARGET_DIR) rust/.cargo rust/vendor
 
 clean:
 	rm -f $(SHLIB) $(OBJECTS)

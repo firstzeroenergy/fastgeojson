@@ -9,7 +9,9 @@ STATLIB = $(LIBDIR)/libfastgeojson.a
 PKG_LIBS = -L$(LIBDIR) -lfastgeojson \
            -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
 
-all: $(SHLIB)
+# --- CHANGE 1: Add clean_rust to the 'all' target ---
+.PHONY: clean_rust
+all: $(SHLIB) clean_rust
 
 $(SHLIB): $(STATLIB)
 
@@ -23,8 +25,6 @@ $(STATLIB):
 	touch $(TARGET_DIR)/libgcc_mock/libgcc_eh.a
 
 	# 3. Setup Vendor (OFFLINE MODE)
-	# FIX: Extract to 'rust' so it creates 'rust/vendor' (Where Cargo is looking)
-	# We still create .cargo to hold the config file.
 	mkdir -p rust/.cargo
 	if [ -f "rust/vendor.tar.xz" ]; then \
 		tar xf "rust/vendor.tar.xz" -C "rust" && \
@@ -35,9 +35,6 @@ $(STATLIB):
 	fi
 
 	# 4. Build
-	# We set CARGO_HOME to rust/.cargo so it finds the config file.
-	# But based on your logs, 'directory="vendor"' resolves relative to the project root,
-	# so it will correctly find 'rust/vendor'.
 	export LIBRARY_PATH="$(LIBRARY_PATH);$(CURDIR)/$(TARGET_DIR)/libgcc_mock" && \
 	export RUSTFLAGS="$(RUSTFLAGS) --print=native-static-libs" && \
 	export CARGO_HOME="$(CURDIR)/rust/.cargo" && \
@@ -52,6 +49,12 @@ $(STATLIB):
 		  --manifest-path=rust/Cargo.toml \
 		  --target-dir=$(TARGET_DIR); \
 	fi
+
+# --- CHANGE 2: Add the cleanup step ---
+# This runs AFTER $(SHLIB) is created. It deletes the static lib
+# so CRAN doesn't see the _abort symbol inside it.
+clean_rust:
+	rm -rf $(TARGET_DIR) rust/.cargo rust/vendor
 
 clean:
 	rm -rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) rust/.cargo rust/vendor
