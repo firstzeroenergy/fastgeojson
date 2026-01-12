@@ -3,11 +3,24 @@ use extendr_ffi as libR_sys;
 use rayon::prelude::*;
 use std::ffi::{CStr, c_char};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::ptr;
-use std::thread;
+use std::slice;
 
-const PAR_THRESHOLD_ROWS: usize = 2000;
+// ------------------------------------------------------------------
+// CONFIGURATION & CONSTANTS
+// ------------------------------------------------------------------
 const PAR_CHUNK_ROWS: usize = 2048;
+
+// Lookup Table for String Escaping (0=Safe, 1=", 2=\, 3=Control)
+static ESCAPE_LUT: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < 32 { table[i] = 3; i += 1; }
+    table[b'"' as usize] = 1;
+    table[b'\\' as usize] = 2;
+    table
+};
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
 const FC_HEAD: &[u8] = br#"{"type":"FeatureCollection","features":["#;
 const FC_TAIL: &[u8] = br#"]}"#;
@@ -21,6 +34,7 @@ enum ColumnType {
     Bool,
     Char,
     Factor,
+    JsonRaw,
     Null,
 }
 
@@ -52,6 +66,10 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
         "panic (unknown payload)".to_string()
     }
 }
+
+// ------------------------------------------------------------------
+// JSON WRITER (DIRECT FORMATTING OPTIMIZED)
+// ------------------------------------------------------------------
 
 struct JsonWriter {
     buf: Vec<u8>,
@@ -86,11 +104,28 @@ impl JsonWriter {
 
     #[inline(always)]
     fn push_f64(&mut self, v: f64) {
-        if v.is_finite() {
-            let mut tmp = ryu::Buffer::new();
-            self.push_bytes(tmp.format_finite(v).as_bytes());
-        } else {
+        if !v.is_finite() {
             self.push_bytes(b"null");
+            return;
+        }
+        // Format integer-like floats as integers (e.g. 10.0 -> 10)
+        if v.fract() == 0.0 && v >= (i32::MIN as f64) && v <= (i32::MAX as f64) {
+            self.push_i32(v as i32);
+        } else {
+            self.push_f64_direct(v);
+        }
+    }
+
+    // OPTIMIZATION: Write float directly to the buffer, avoiding stack copy.
+    #[inline(always)]
+    fn push_f64_direct(&mut self, v: f64) {
+        // ryu guarantees max 24 bytes for f64
+        self.reserve(24);
+        let len = self.buf.len();
+        unsafe {
+            let ptr = self.buf.as_mut_ptr().add(len);
+            let written = ryu::raw::format64(v, ptr);
+            self.buf.set_len(len + written);
         }
     }
 
@@ -98,73 +133,40 @@ impl JsonWriter {
     fn push_bool(&mut self, v: bool) {
         if v { self.push_bytes(b"true"); } else { self.push_bytes(b"false"); }
     }
-
-    #[inline(always)]
-    unsafe fn push_u8_unchecked(&mut self, b: u8) {
-        let len = self.buf.len();
-        let p = self.buf.as_mut_ptr().add(len);
-        ptr::write(p, b);
-        self.buf.set_len(len + 1);
-    }
-
-    #[inline(always)]
-    unsafe fn push_f64_unchecked(&mut self, v: f64) {
-        if v.is_finite() {
-            let mut tmp = ryu::Buffer::new();
-            let s = tmp.format_finite(v).as_bytes();
-            let len = self.buf.len();
-            let p = self.buf.as_mut_ptr().add(len);
-            ptr::copy_nonoverlapping(s.as_ptr(), p, s.len());
-            self.buf.set_len(len + s.len());
-        } else {
-            let len = self.buf.len();
-            let p = self.buf.as_mut_ptr().add(len);
-            ptr::copy_nonoverlapping(b"null".as_ptr(), p, 4);
-            self.buf.set_len(len + 4);
-        }
-    }
-
-    #[inline]
-    unsafe fn push_charsxp_as_json_string(&mut self, charsxp: libR_sys::SEXP) {
-        if let Some(bytes) = charsxp_to_utf8_bytes(charsxp) {
-            escape_json_string_into(&mut self.buf, bytes);
-        } else {
-            self.push_bytes(b"null");
-        }
-    }
 }
 
 #[inline]
 fn escape_json_string_into(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'"');
     let mut start = 0;
+    let len = bytes.len();
 
-    for (i, &b) in bytes.iter().enumerate() {
-        let esc: &[u8] = match b {
-            b'"' => br#"\""#,
-            b'\\' => br#"\\"#,
-            b'\n' => br#"\n"#,
-            b'\r' => br#"\r"#,
-            b'\t' => br#"\t"#,
-            0x00..=0x1F => {
-                out.extend_from_slice(&bytes[start..i]);
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                out.extend_from_slice(br#"\u00"#);
-                out.push(HEX[(b >> 4) as usize]);
-                out.push(HEX[(b & 0x0F) as usize]);
-                start = i + 1;
-                continue;
+    while start < len {
+        // FAST SCAN: Find next char needing escape using LUT
+        let offset = bytes[start..].iter().position(|&b| ESCAPE_LUT[b as usize] != 0);
+
+        match offset {
+            Some(i) => {
+                let esc_idx = start + i;
+                out.extend_from_slice(&bytes[start..esc_idx]);
+                let b = bytes[esc_idx];
+                match ESCAPE_LUT[b as usize] {
+                    1 => out.extend_from_slice(br#"\""#),
+                    2 => out.extend_from_slice(br#"\\"#),
+                    3 => {
+                        out.extend_from_slice(br#"\u00"#);
+                        out.push(HEX_DIGITS[(b >> 4) as usize]);
+                        out.push(HEX_DIGITS[(b & 0x0F) as usize]);
+                    }
+                    _ => {}
+                }
+                start = esc_idx + 1;
             }
-            _ => continue,
-        };
-
-        out.extend_from_slice(&bytes[start..i]);
-        out.extend_from_slice(esc);
-        start = i + 1;
-    }
-
-    if start < bytes.len() {
-        out.extend_from_slice(&bytes[start..]);
+            None => {
+                out.extend_from_slice(&bytes[start..]);
+                break;
+            }
+        }
     }
     out.push(b'"');
 }
@@ -177,28 +179,20 @@ fn build_escaped_key_bytes(name: &str) -> Vec<u8> {
     key
 }
 
+// ------------------------------------------------------------------
+// C-API HELPERS
+// ------------------------------------------------------------------
+
 #[inline(always)]
 unsafe fn sexp_len(x: libR_sys::SEXP) -> usize {
-    let n = libR_sys::Rf_xlength(x); // R_xlen_t (64-bit)
-    if n < 0 {
-        // should never happen, but keep it explicit
-        return 0;
-    }
+    let n = libR_sys::Rf_xlength(x); 
+    if n < 0 { return 0; }
     n as usize
 }
 
 #[inline(always)]
 unsafe fn typeof_sexp(x: libR_sys::SEXP) -> u32 {
     libR_sys::TYPEOF(x) as u32
-}
-
-#[inline(always)]
-unsafe fn safe_vector_elt(x: libR_sys::SEXP, i: usize) -> Option<libR_sys::SEXP> {
-    if x == libR_sys::R_NilValue || typeof_sexp(x) != libR_sys::SEXPTYPE::VECSXP as u32 || i >= sexp_len(x) {
-        None
-    } else {
-        Some(libR_sys::VECTOR_ELT(x, i as isize))
-    }
 }
 
 #[inline(always)]
@@ -223,184 +217,355 @@ unsafe fn is_na_string(sexp: libR_sys::SEXP) -> bool {
 
 #[inline]
 unsafe fn charsxp_to_utf8_bytes(charsxp: libR_sys::SEXP) -> Option<&'static [u8]> {
-    if charsxp == libR_sys::R_NilValue || is_na_string(charsxp) {
-        return None;
-    }
-    let cptr = libR_sys::R_CHAR(charsxp);
-    if cptr.is_null() {
-        return None;
-    }
-    Some(CStr::from_ptr(cptr).to_bytes())
-}
-
-// -------------------- single-thread properties --------------------
-
-struct PropertyColumn {
-    name_key: Vec<u8>,
-    kind: ColumnType,
-    data_ptr: *const u8, 
-    cached_levels: Option<Vec<Vec<u8>>>,
-    len: usize,
-}
-
-fn build_property_columns_single(df: &List, colnames: &[String], geom_idx: usize) -> Vec<PropertyColumn> {
-    let mut out = Vec::with_capacity(colnames.len());
-
-    for (j, nm) in colnames.iter().enumerate() {
-        if j == geom_idx {
-            continue;
-        }
-
-        let col = match df.elt(j) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let col_sexp = unsafe { col.get() };
-        let len = unsafe { sexp_len(col_sexp) };
-        let r_type = col.rtype(); 
-        let name_key = build_escaped_key_bytes(nm);
-
-        let (kind, ptr_addr, cached_levels) = if col.inherits("factor") && r_type == Rtype::Integers {
-            let levels = match col.get_attrib("levels") { Some(l) => l, None => continue };
-            let levels_sexp = unsafe { levels.get() };
-            let n_lev = unsafe { sexp_len(levels_sexp) };
-
-            let mut cache = Vec::with_capacity(n_lev);
-            for k in 0..n_lev {
-                let lev_charsxp = unsafe { libR_sys::STRING_ELT(levels_sexp, k as isize) };
-                let mut buf = Vec::with_capacity(32);
-                unsafe {
-                    if let Some(bytes) = charsxp_to_utf8_bytes(lev_charsxp) {
-                        escape_json_string_into(&mut buf, bytes);
-                    } else {
-                        buf.extend_from_slice(b"null");
-                    }
-                }
-                cache.push(buf);
-            }
-
-            (ColumnType::Factor, unsafe { libR_sys::INTEGER(col_sexp) as *const u8 }, Some(cache))
-        } else if r_type == Rtype::Integers {
-            (ColumnType::Int, unsafe { libR_sys::INTEGER(col_sexp) as *const u8 }, None)
-        } else if r_type == Rtype::Doubles { 
-            (ColumnType::Real, unsafe { libR_sys::REAL(col_sexp) as *const u8 }, None)
-        } else if r_type == Rtype::Logicals {
-            (ColumnType::Bool, unsafe { libR_sys::LOGICAL(col_sexp) as *const u8 }, None)
-        } else if r_type == Rtype::Strings {
-            (ColumnType::Char, col_sexp as *const u8, None)
-        } else {
-            (ColumnType::Null, ptr::null(), None)
-        };
-
-        out.push(PropertyColumn { name_key, kind, data_ptr: ptr_addr, cached_levels, len });
-    }
-
-    out
+    if charsxp == libR_sys::R_NilValue { return None; }
+    let len = libR_sys::Rf_xlength(charsxp);
+    let ptr = libR_sys::R_CHAR(charsxp) as *const u8;
+    Some(slice::from_raw_parts(ptr, len as usize))
 }
 
 #[inline]
-unsafe fn write_prop_value_single(out: &mut JsonWriter, pc: &PropertyColumn, row: usize) -> bool {
-    if row >= pc.len {
+unsafe fn get_df_nrows(sexp: libR_sys::SEXP) -> usize {
+    let rn_sym = libR_sys::R_RowNamesSymbol;
+    let rn = libR_sys::Rf_getAttrib(sexp, rn_sym);
+    if rn == libR_sys::R_NilValue { return 0; }
+    if typeof_sexp(rn) == libR_sys::SEXPTYPE::INTSXP as u32 && sexp_len(rn) == 2 {
+        let p = libR_sys::INTEGER(rn);
+        let first = *p;
+        if first == libR_sys::R_NaInt {
+            let second = *p.add(1);
+            return second.abs() as usize;
+        }
+    }
+    sexp_len(rn)
+}
+
+// ------------------------------------------------------------------
+// SERIALIZER HELPERS
+// ------------------------------------------------------------------
+
+unsafe fn try_serialize_matrix(x: libR_sys::SEXP, r_type: u32, buf: &mut Vec<u8>) -> bool {
+    let dim_sym = libR_sys::R_DimSymbol;
+    let dim = libR_sys::Rf_getAttrib(x, dim_sym);
+    
+    if dim == libR_sys::R_NilValue || sexp_len(dim) != 2 || typeof_sexp(dim) != libR_sys::SEXPTYPE::INTSXP as u32 {
         return false;
     }
 
-    match pc.kind {
-        ColumnType::Int => {
-            let v = *(pc.data_ptr as *const i32).add(row);
-            if !is_na_int(v) { out.push_i32(v); true } else { false }
-        }
-        ColumnType::Real => {
-            let v = *(pc.data_ptr as *const f64).add(row);
-            if !is_na_real(v) && !is_nan_real(v) { out.push_f64(v); true } else { false }
-        }
-        ColumnType::Bool => {
-            let v = *(pc.data_ptr as *const i32).add(row);
-            if !is_na_int(v) { out.push_bool(v != 0); true } else { false }
-        }
-        ColumnType::Char => {
-            let vec_sexp = pc.data_ptr as libR_sys::SEXP;
-            let elt = libR_sys::STRING_ELT(vec_sexp, row as isize);
-            
-            if elt != libR_sys::R_NilValue && !is_na_string(elt) {
-                out.push_charsxp_as_json_string(elt);
-                true
-            } else {
-                false
-            }
-        }
-        ColumnType::Factor => {
-            let code = *(pc.data_ptr as *const i32).add(row);
-            if !is_na_int(code) && code > 0 {
-                if let Some(ref levels) = pc.cached_levels {
-                    let idx = (code as usize).saturating_sub(1);
-                    if idx < levels.len() {
-                        out.push_bytes(&levels[idx]);
-                        return true;
+    let dim_ptr = libR_sys::INTEGER(dim);
+    let nrows = *dim_ptr as usize;
+    let ncols = *dim_ptr.add(1) as usize;
+
+    buf.push(b'[');
+    for r in 0..nrows {
+        if r > 0 { buf.push(b','); }
+        buf.push(b'[');
+        for c in 0..ncols {
+            if c > 0 { buf.push(b','); }
+            let idx = r + c * nrows;
+            match r_type {
+                t if t == libR_sys::SEXPTYPE::INTSXP as u32 => {
+                    let v = *libR_sys::INTEGER(x).add(idx);
+                    if is_na_int(v) { buf.extend_from_slice(b"\"NA\""); }
+                    else {
+                        let mut tmp = itoa::Buffer::new();
+                        buf.extend_from_slice(tmp.format(v).as_bytes());
                     }
-                }
+                },
+                t if t == libR_sys::SEXPTYPE::REALSXP as u32 => {
+                    let v = *libR_sys::REAL(x).add(idx);
+                    if is_na_real(v) { buf.extend_from_slice(b"\"NA\""); }
+                    else if is_nan_real(v) { buf.extend_from_slice(b"\"NaN\""); }
+                    else if v == f64::INFINITY { buf.extend_from_slice(b"\"Inf\""); }
+                    else if v == f64::NEG_INFINITY { buf.extend_from_slice(b"\"-Inf\""); }
+                    else {
+                        if v.fract() == 0.0 && v >= (i32::MIN as f64) && v <= (i32::MAX as f64) {
+                            let mut tmp = itoa::Buffer::new();
+                            buf.extend_from_slice(tmp.format(v as i32).as_bytes());
+                        } else {
+                            // Inline direct write
+                            buf.reserve(24);
+                            let len = buf.len();
+                            let ptr = buf.as_mut_ptr().add(len);
+                            let written = ryu::raw::format64(v, ptr);
+                            buf.set_len(len + written);
+                        }
+                    }
+                },
+                t if t == libR_sys::SEXPTYPE::LGLSXP as u32 => {
+                    let v = *libR_sys::LOGICAL(x).add(idx);
+                    if is_na_int(v) { buf.extend_from_slice(b"\"NA\""); }
+                    else if v != 0 { buf.extend_from_slice(b"true"); }
+                    else { buf.extend_from_slice(b"false"); }
+                },
+                t if t == libR_sys::SEXPTYPE::STRSXP as u32 => {
+                    let s_sexp = libR_sys::STRING_ELT(x, idx as isize);
+                    if is_na_string(s_sexp) { buf.extend_from_slice(b"\"NA\""); }
+                    else if let Some(bytes) = charsxp_to_utf8_bytes(s_sexp) { escape_json_string_into(buf, bytes); }
+                    else { buf.extend_from_slice(b"\"NA\""); }
+                },
+                _ => buf.extend_from_slice(b"null")
             }
-            false
         }
-        ColumnType::Null => false,
+        buf.push(b']');
     }
+    buf.push(b']');
+    true
 }
 
-// -------------------- single-thread geometries --------------------
-
-fn write_coords_matrix_single(out: &mut JsonWriter, geom: libR_sys::SEXP) {
-    let len = unsafe { sexp_len(geom) };
-    if len < 2 {
-        out.push_bytes(b"[]");
+unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
+    if x == libR_sys::R_NilValue {
+        buf.extend_from_slice(b"{}");
         return;
     }
-    let nrow = len / 2;
-    out.reserve(nrow * 55);
+    let robj = Robj::from_sexp(x);
 
-    out.push_u8(b'[');
-    if unsafe { typeof_sexp(geom) } == libR_sys::SEXPTYPE::REALSXP as u32 {
-        let p = unsafe { libR_sys::REAL(geom) };
-        for i in 0..nrow {
-            if i > 0 {
-                unsafe { out.push_u8_unchecked(b','); }
+    if robj.inherits("factor") && typeof_sexp(x) == libR_sys::SEXPTYPE::INTSXP as u32 {
+        if let Some(levels) = robj.get_attrib("levels") {
+            let levels_sexp = levels.get();
+            let n_levels = sexp_len(levels_sexp);
+            let n = sexp_len(x);
+            let p = libR_sys::INTEGER(x);
+            buf.push(b'[');
+            for i in 0..n {
+                if i > 0 { buf.push(b','); }
+                let v = *p.add(i);
+                if is_na_int(v) || v < 1 { buf.extend_from_slice(b"\"NA\""); }
+                else {
+                    let idx = (v - 1) as usize;
+                    if idx < n_levels {
+                        let level_charsxp = libR_sys::STRING_ELT(levels_sexp, idx as isize);
+                        if let Some(bytes) = charsxp_to_utf8_bytes(level_charsxp) { escape_json_string_into(buf, bytes); }
+                        else { buf.extend_from_slice(b"\"NA\""); }
+                    } else { buf.extend_from_slice(b"\"NA\""); }
+                }
             }
-            unsafe {
-                let x = *p.add(i);
-                let y = *p.add(i + nrow);
-                out.push_u8_unchecked(b'[');
-                out.push_f64_unchecked(x);
-                out.push_u8_unchecked(b',');
-                out.push_f64_unchecked(y);
-                out.push_u8_unchecked(b']');
-            }
+            buf.push(b']');
+            return;
         }
     }
-    out.push_u8(b']');
-}
 
-fn write_point_single(out: &mut JsonWriter, geom: libR_sys::SEXP) {
-    let p = unsafe { libR_sys::REAL(geom) };
-    out.push_u8(b'[');
-    unsafe {
-        out.push_f64(*p);
-        out.push_u8(b',');
-        out.push_f64(*p.add(1));
+    if robj.inherits("Date") || robj.inherits("POSIXt") {
+        if let Ok(char_robj) = call!("format", robj.clone()) {
+            serialize_sexp_to_json_buffer(char_robj.get(), buf);
+            return;
+        }
     }
-    out.push_u8(b']');
-}
 
-fn write_geom_list_single(out: &mut JsonWriter, list: libR_sys::SEXP, writer: fn(&mut JsonWriter, libR_sys::SEXP)) {
-    let n = unsafe { sexp_len(list) };
-    out.push_u8(b'[');
-    for i in 0..n {
-        if i > 0 { out.push_u8(b','); }
-        if let Some(elt) = unsafe { safe_vector_elt(list, i) } { writer(out, elt); }
-        else { out.push_bytes(b"null"); }
+    let r_type = typeof_sexp(x);
+    if try_serialize_matrix(x, r_type, buf) { return; }
+
+    if r_type == libR_sys::SEXPTYPE::INTSXP as u32 {
+        let n = sexp_len(x);
+        let p = libR_sys::INTEGER(x);
+        buf.push(b'[');
+        for i in 0..n {
+            if i > 0 { buf.push(b','); }
+            let v = *p.add(i);
+            if is_na_int(v) { buf.extend_from_slice(b"\"NA\""); }
+            else {
+                let mut tmp = itoa::Buffer::new();
+                buf.extend_from_slice(tmp.format(v).as_bytes());
+            }
+        }
+        buf.push(b']');
+        return;
     }
-    out.push_u8(b']');
+
+    if r_type == libR_sys::SEXPTYPE::REALSXP as u32 {
+        let n = sexp_len(x);
+        let p = libR_sys::REAL(x);
+        buf.push(b'[');
+        for i in 0..n {
+            if i > 0 { buf.push(b','); }
+            let v = *p.add(i);
+            if is_na_real(v) { buf.extend_from_slice(b"\"NA\""); }
+            else if is_nan_real(v) { buf.extend_from_slice(b"\"NaN\""); }
+            else if v == f64::INFINITY { buf.extend_from_slice(b"\"Inf\""); }
+            else if v == f64::NEG_INFINITY { buf.extend_from_slice(b"\"-Inf\""); }
+            else {
+                if v.fract() == 0.0 && v >= (i32::MIN as f64) && v <= (i32::MAX as f64) {
+                    let mut tmp = itoa::Buffer::new();
+                    buf.extend_from_slice(tmp.format(v as i32).as_bytes());
+                } else {
+                    // Inline direct write
+                    buf.reserve(24);
+                    let len = buf.len();
+                    let ptr = buf.as_mut_ptr().add(len);
+                    let written = ryu::raw::format64(v, ptr);
+                    buf.set_len(len + written);
+                }
+            }
+        }
+        buf.push(b']');
+        return;
+    }
+
+    if r_type == libR_sys::SEXPTYPE::LGLSXP as u32 {
+        let n = sexp_len(x);
+        let p = libR_sys::LOGICAL(x);
+        buf.push(b'[');
+        for i in 0..n {
+            if i > 0 { buf.push(b','); }
+            let v = *p.add(i);
+            if is_na_int(v) { buf.extend_from_slice(b"\"NA\""); }
+            else if v != 0 { buf.extend_from_slice(b"true"); }
+            else { buf.extend_from_slice(b"false"); }
+        }
+        buf.push(b']');
+        return;
+    }
+
+    if r_type == libR_sys::SEXPTYPE::STRSXP as u32 {
+        let n = sexp_len(x);
+        buf.push(b'[');
+        for i in 0..n {
+            if i > 0 { buf.push(b','); }
+            let s_sexp = libR_sys::STRING_ELT(x, i as isize);
+            if is_na_string(s_sexp) { buf.extend_from_slice(b"\"NA\""); }
+            else if let Some(bytes) = charsxp_to_utf8_bytes(s_sexp) { escape_json_string_into(buf, bytes); }
+            else { buf.extend_from_slice(b"\"NA\""); }
+        }
+        buf.push(b']');
+        return;
+    }
+
+    if r_type == libR_sys::SEXPTYPE::VECSXP as u32 {
+        if robj.inherits("data.frame") {
+            let n_rows = get_df_nrows(x);
+            let n_cols = sexp_len(x);
+            let names_sym = libR_sys::R_NamesSymbol;
+            let names_sexp = libR_sys::Rf_getAttrib(x, names_sym);
+            let has_names = names_sexp != libR_sys::R_NilValue && sexp_len(names_sexp) == n_cols;
+
+            buf.push(b'[');
+            for r in 0..n_rows {
+                if r > 0 { buf.push(b','); }
+                buf.push(b'{');
+                let mut needs_comma = false;
+                for c in 0..n_cols {
+                    let col_sexp = libR_sys::VECTOR_ELT(x, c as isize);
+                    let col_len = sexp_len(col_sexp);
+                    if r < col_len {
+                        if needs_comma { buf.push(b','); }
+                        if has_names {
+                            let key_charsxp = libR_sys::STRING_ELT(names_sexp, c as isize);
+                            if !is_na_string(key_charsxp) {
+                                if let Some(key_bytes) = charsxp_to_utf8_bytes(key_charsxp) { escape_json_string_into(buf, key_bytes); }
+                                else { buf.extend_from_slice(b"\"\""); }
+                            } else { buf.extend_from_slice(b"\"\""); }
+                        } else { buf.extend_from_slice(b"\"\""); }
+                        buf.push(b':');
+                        serialize_element_at_index(col_sexp, r, buf);
+                        needs_comma = true;
+                    }
+                }
+                buf.push(b'}');
+            }
+            buf.push(b']');
+            return;
+        }
+
+        let n = sexp_len(x);
+        let names_sym = libR_sys::R_NamesSymbol;
+        let names_sexp = libR_sys::Rf_getAttrib(x, names_sym);
+        let has_names = names_sexp != libR_sys::R_NilValue && sexp_len(names_sexp) == n;
+        if has_names {
+            buf.push(b'{');
+            for i in 0..n {
+                if i > 0 { buf.push(b','); }
+                let key_charsxp = libR_sys::STRING_ELT(names_sexp, i as isize);
+                if !is_na_string(key_charsxp) {
+                    if let Some(key_bytes) = charsxp_to_utf8_bytes(key_charsxp) { escape_json_string_into(buf, key_bytes); }
+                    else { buf.extend_from_slice(b"\"\""); }
+                } else { buf.extend_from_slice(b"\"\""); }
+                buf.push(b':');
+                let val_sexp = libR_sys::VECTOR_ELT(x, i as isize);
+                serialize_sexp_to_json_buffer(val_sexp, buf);
+            }
+            buf.push(b'}');
+        } else {
+            buf.push(b'[');
+            for i in 0..n {
+                if i > 0 { buf.push(b','); }
+                let val_sexp = libR_sys::VECTOR_ELT(x, i as isize);
+                serialize_sexp_to_json_buffer(val_sexp, buf);
+            }
+            buf.push(b']');
+        }
+        return;
+    }
+    buf.extend_from_slice(b"{}");
 }
 
-// -------------------- parallel-safe columns --------------------
+unsafe fn serialize_element_at_index(col: libR_sys::SEXP, idx: usize, buf: &mut Vec<u8>) {
+    let r_type = typeof_sexp(col);
+    let robj = Robj::from_sexp(col);
+    if robj.inherits("factor") && r_type == libR_sys::SEXPTYPE::INTSXP as u32 {
+        if let Some(levels) = robj.get_attrib("levels") {
+            let levels_sexp = levels.get();
+            let p = libR_sys::INTEGER(col);
+            let v = *p.add(idx);
+            if is_na_int(v) || v < 1 { buf.extend_from_slice(b"null"); }
+            else {
+                let lvl_idx = (v - 1) as usize;
+                if lvl_idx < sexp_len(levels_sexp) {
+                    let s = libR_sys::STRING_ELT(levels_sexp, lvl_idx as isize);
+                    if let Some(bytes) = charsxp_to_utf8_bytes(s) { escape_json_string_into(buf, bytes); }
+                    else { buf.extend_from_slice(b"null"); }
+                } else { buf.extend_from_slice(b"null"); }
+            }
+            return;
+        }
+    }
+    match r_type {
+        _ if r_type == libR_sys::SEXPTYPE::INTSXP as u32 => {
+            let v = *libR_sys::INTEGER(col).add(idx);
+            if is_na_int(v) { buf.extend_from_slice(b"null"); }
+            else {
+                let mut tmp = itoa::Buffer::new();
+                buf.extend_from_slice(tmp.format(v).as_bytes());
+            }
+        },
+        _ if r_type == libR_sys::SEXPTYPE::REALSXP as u32 => {
+            let v = *libR_sys::REAL(col).add(idx);
+            if is_na_real(v) || is_nan_real(v) || !v.is_finite() { buf.extend_from_slice(b"null"); }
+            else {
+                if v.fract() == 0.0 && v >= (i32::MIN as f64) && v <= (i32::MAX as f64) {
+                    let mut tmp = itoa::Buffer::new();
+                    buf.extend_from_slice(tmp.format(v as i32).as_bytes());
+                } else {
+                    // Inline direct write
+                    buf.reserve(24);
+                    let len = buf.len();
+                    let ptr = buf.as_mut_ptr().add(len);
+                    let written = ryu::raw::format64(v, ptr);
+                    buf.set_len(len + written);
+                }
+            }
+        },
+        _ if r_type == libR_sys::SEXPTYPE::LGLSXP as u32 => {
+            let v = *libR_sys::LOGICAL(col).add(idx);
+            if is_na_int(v) { buf.extend_from_slice(b"null"); }
+            else if v != 0 { buf.extend_from_slice(b"true"); }
+            else { buf.extend_from_slice(b"false"); }
+        },
+        _ if r_type == libR_sys::SEXPTYPE::STRSXP as u32 => {
+            let s = libR_sys::STRING_ELT(col, idx as isize);
+            if is_na_string(s) { buf.extend_from_slice(b"null"); }
+            else if let Some(bytes) = charsxp_to_utf8_bytes(s) { escape_json_string_into(buf, bytes); }
+            else { buf.extend_from_slice(b"null"); }
+        },
+        _ if r_type == libR_sys::SEXPTYPE::VECSXP as u32 => {
+             let val = libR_sys::VECTOR_ELT(col, idx as isize);
+             serialize_sexp_to_json_buffer(val, buf);
+        },
+        _ => buf.extend_from_slice(b"null"),
+    }
+}
+
+// ------------------------------------------------------------------
+// PARALLEL SAFE COLUMNS
+// ------------------------------------------------------------------
 
 struct StringArena {
     bytes: Vec<u8>,
@@ -418,166 +583,283 @@ struct ThreadSafeColumn {
 unsafe impl Send for ThreadSafeColumn {}
 unsafe impl Sync for ThreadSafeColumn {}
 
+unsafe fn is_default_rownames(rn: libR_sys::SEXP) -> bool {
+    if rn == libR_sys::R_NilValue { return true; }
+    if typeof_sexp(rn) == libR_sys::SEXPTYPE::INTSXP as u32 && sexp_len(rn) == 2 {
+        let p = libR_sys::INTEGER(rn);
+        if *p == libR_sys::R_NaInt { return true; }
+    }
+    let n = sexp_len(rn);
+    if typeof_sexp(rn) == libR_sys::SEXPTYPE::INTSXP as u32 {
+        let p = libR_sys::INTEGER(rn);
+        for i in 0..n {
+            if *p.add(i) != (i as i32 + 1) { return false; }
+        }
+        return true;
+    }
+    if typeof_sexp(rn) == libR_sys::SEXPTYPE::STRSXP as u32 {
+        let mut tmp = itoa::Buffer::new();
+        for i in 0..n {
+            let s_sexp = libR_sys::STRING_ELT(rn, i as isize);
+            if is_na_string(s_sexp) { return false; }
+            let s_ptr = libR_sys::R_CHAR(s_sexp) as *const c_char;
+            let s_slice = CStr::from_ptr(s_ptr).to_bytes();
+            let expected = tmp.format(i + 1);
+            if s_slice != expected.as_bytes() { return false; }
+        }
+        return true;
+    }
+    false
+}
+
 fn build_thread_safe_cols(
     df: &List,
     colnames: &[String],
     skip_idx: usize,
-    expected_rows: usize,
+    _expected_rows: usize, 
 ) -> Result<Vec<(Vec<u8>, ThreadSafeColumn)>> {
-    let mut out = Vec::with_capacity(colnames.len());
+    let mut out = Vec::with_capacity(colnames.len() + 1);
 
     for (j, nm) in colnames.iter().enumerate() {
-        if j == skip_idx {
-            continue;
+        if j == skip_idx { continue; }
+        let mut col = df.elt(j).map_err(|_| Error::Other(format!("Column '{}' missing", nm)))?;
+        let is_date = col.inherits("Date");
+        let is_posixt = col.inherits("POSIXt");
+        if is_date || is_posixt {
+            col = call!("format", &col).map_err(|e| Error::Other(format!("format failed: {:?}", e)))?;
         }
-
-        let col = df.elt(j).map_err(|_| Error::Other(format!("Column '{}' missing", nm)))?;
         let sexp = unsafe { col.get() };
-
-        let len = unsafe { sexp_len(sexp) };
-        if len != expected_rows {
-            return rerr(format!(
-                "Data inconsistency: Column '{}' has length {}, expected {}",
-                nm, len, expected_rows
-            ));
-        }
-
         let r_type = col.rtype();
         let key = build_escaped_key_bytes(nm);
 
-        let (kind, ptr, cached_levels, arena) = if col.inherits("factor") && r_type == Rtype::Integers {
-            let levels = col
-                .get_attrib("levels")
-                .ok_or_else(|| Error::Other("Factor missing levels".to_string()))?;
-            let levels_sexp = unsafe { levels.get() };
-            let n = unsafe { sexp_len(levels_sexp) };
-
-            let mut cache = Vec::with_capacity(n);
-            for idx in 0..n {
-                let s = unsafe { libR_sys::STRING_ELT(levels_sexp, idx as isize) };
-                let mut buf = Vec::with_capacity(32);
-                unsafe {
-                    if let Some(bytes) = charsxp_to_utf8_bytes(s) { escape_json_string_into(&mut buf, bytes); }
-                    else { buf.extend_from_slice(b"null"); }
-                }
-                cache.push(buf);
-            }
-
-            (ColumnType::Factor, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, Some(cache), None)
-        } else if r_type == Rtype::Integers {
-            (ColumnType::Int, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, None, None)
-        } else if r_type == Rtype::Doubles { 
-            (ColumnType::Real, unsafe { libR_sys::REAL(sexp) as *const u8 as usize }, None, None)
-        } else if r_type == Rtype::Logicals {
-            (ColumnType::Bool, unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize }, None, None)
-        } else if r_type == Rtype::Strings {
-            let n = unsafe { sexp_len(sexp) };
-            let mut bytes = Vec::with_capacity(n * 16);
-            let mut offsets = Vec::with_capacity(n);
-
-            for i in 0..n {
-                let s_sexp = unsafe { libR_sys::STRING_ELT(sexp, i as isize) };
-                if unsafe { is_na_string(s_sexp) } {
-                    offsets.push((0, 0));
-                } else if let Some(utf8) = unsafe { charsxp_to_utf8_bytes(s_sexp) } {
-                    let start = bytes.len();
-                    bytes.extend_from_slice(utf8);
-                    offsets.push((start, bytes.len() - start));
-                } else {
-                    offsets.push((0, 0));
-                }
-            }
-
-            (ColumnType::Char, 0, None, Some(StringArena { bytes, offsets }))
-        } else {
-            (ColumnType::Null, 0, None, None)
+        let dim_attr = unsafe { libR_sys::Rf_getAttrib(sexp, libR_sys::R_DimSymbol) };
+        let is_matrix = unsafe { 
+            dim_attr != libR_sys::R_NilValue && 
+            sexp_len(dim_attr) == 2 && 
+            *libR_sys::INTEGER(dim_attr) == _expected_rows as i32 
         };
 
+        if is_matrix {
+             let dim_ptr = unsafe { libR_sys::INTEGER(dim_attr) };
+             let n_matrix_cols = unsafe { *dim_ptr.add(1) } as usize;
+             let mut bytes = Vec::new();
+             let mut offsets = Vec::with_capacity(_expected_rows);
+             
+             for r in 0.._expected_rows {
+                 let start = bytes.len();
+                 bytes.push(b'[');
+                 for c in 0..n_matrix_cols {
+                     if c > 0 { bytes.push(b','); }
+                     let idx = c * _expected_rows + r;
+                     if r_type == Rtype::Integers {
+                         let p = unsafe { libR_sys::INTEGER(sexp) };
+                         let v = unsafe { *p.add(idx) };
+                         if unsafe { is_na_int(v) } { bytes.extend_from_slice(b"null"); }
+                         else {
+                             let mut tmp = itoa::Buffer::new();
+                             bytes.extend_from_slice(tmp.format(v).as_bytes());
+                         }
+                     } else if r_type == Rtype::Doubles {
+                         let p = unsafe { libR_sys::REAL(sexp) };
+                         let v = unsafe { *p.add(idx) };
+                         if unsafe { is_na_real(v) || is_nan_real(v) || !v.is_finite() } { bytes.extend_from_slice(b"null"); }
+                         else {
+                             if v.fract() == 0.0 && v >= (i32::MIN as f64) && v <= (i32::MAX as f64) {
+                                 let mut tmp = itoa::Buffer::new();
+                                 bytes.extend_from_slice(tmp.format(v as i32).as_bytes());
+                             } else {
+                                 // Inline direct write
+                                 bytes.reserve(24);
+                                 let len = bytes.len();
+                                 unsafe {
+                                     let ptr = bytes.as_mut_ptr().add(len);
+                                     let written = ryu::raw::format64(v, ptr);
+                                     bytes.set_len(len + written);
+                                 }
+                             }
+                         }
+                     } else if r_type == Rtype::Logicals {
+                         let p = unsafe { libR_sys::LOGICAL(sexp) };
+                         let v = unsafe { *p.add(idx) };
+                         if unsafe { is_na_int(v) } { bytes.extend_from_slice(b"null"); }
+                         else if v != 0 { bytes.extend_from_slice(b"true"); }
+                         else { bytes.extend_from_slice(b"false"); }
+                     } else if r_type == Rtype::Strings {
+                         let s = unsafe { libR_sys::STRING_ELT(sexp, idx as isize) };
+                         if unsafe { is_na_string(s) } { bytes.extend_from_slice(b"null"); }
+                         else if let Some(utf8) = unsafe { charsxp_to_utf8_bytes(s) } { escape_json_string_into(&mut bytes, utf8); }
+                         else { bytes.extend_from_slice(b"null"); }
+                     } else if r_type == Rtype::List {
+                         let item = unsafe { libR_sys::VECTOR_ELT(sexp, idx as isize) };
+                         unsafe { serialize_sexp_to_json_buffer(item, &mut bytes); }
+                     } else { bytes.extend_from_slice(b"null"); }
+                 }
+                 bytes.push(b']');
+                 offsets.push((start, bytes.len() - start));
+             }
+             let col = ThreadSafeColumn { kind: ColumnType::JsonRaw, data_ptr: 0, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }) };
+             out.push((key, col));
+             continue;
+        }
+
+        let (kind, ptr, cached_levels, arena) =
+            if col.inherits("factor") && r_type == Rtype::Integers {
+                let levels = col.get_attrib("levels").ok_or_else(|| Error::Other("Factor missing levels".to_string()))?;
+                let levels_sexp = unsafe { levels.get() };
+                let n = unsafe { sexp_len(levels_sexp) };
+                let mut cache = Vec::with_capacity(n);
+                for idx in 0..n {
+                    let s = unsafe { libR_sys::STRING_ELT(levels_sexp, idx as isize) };
+                    let mut buf = Vec::with_capacity(32);
+                    unsafe {
+                        if let Some(bytes) = charsxp_to_utf8_bytes(s) { escape_json_string_into(&mut buf, bytes); }
+                        else { buf.extend_from_slice(b"null"); }
+                    }
+                    cache.push(buf);
+                }
+                (ColumnType::Factor, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, Some(cache), None)
+            } else if r_type == Rtype::Integers {
+                (ColumnType::Int, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, None, None)
+            } else if r_type == Rtype::Doubles {
+                (ColumnType::Real, unsafe { libR_sys::REAL(sexp) as *const u8 as usize }, None, None)
+            } else if r_type == Rtype::Logicals {
+                (ColumnType::Bool, unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize }, None, None)
+            } else if r_type == Rtype::Strings {
+                let n = unsafe { sexp_len(sexp) };
+                let mut bytes = Vec::with_capacity(n * 16);
+                let mut offsets = Vec::with_capacity(n);
+                for i in 0..n {
+                    let s_sexp = unsafe { libR_sys::STRING_ELT(sexp, i as isize) };
+                    if unsafe { is_na_string(s_sexp) } {
+                        offsets.push((usize::MAX, 0));
+                    } else if let Some(utf8) = unsafe { charsxp_to_utf8_bytes(s_sexp) } {
+                        let start = bytes.len();
+                        bytes.extend_from_slice(utf8);
+                        offsets.push((start, bytes.len() - start));
+                    } else {
+                        offsets.push((usize::MAX, 0));
+                    }
+                }
+                (ColumnType::Char, 0, None, Some(StringArena { bytes, offsets }))
+            } else if r_type == Rtype::List {
+                let n = unsafe { sexp_len(sexp) };
+                let mut bytes = Vec::with_capacity(n * 64);
+                let mut offsets = Vec::with_capacity(n);
+                for i in 0..n {
+                    let item = unsafe { libR_sys::VECTOR_ELT(sexp, i as isize) };
+                    let start = bytes.len();
+                    unsafe { serialize_sexp_to_json_buffer(item, &mut bytes); }
+                    offsets.push((start, bytes.len() - start));
+                }
+                (ColumnType::JsonRaw, 0, None, Some(StringArena { bytes, offsets }))
+            } else {
+                (ColumnType::Null, 0, None, None)
+            };
         out.push((key, ThreadSafeColumn { kind, data_ptr: ptr, cached_levels, string_arena: arena }));
     }
 
+    let rn_sexp = unsafe { libR_sys::Rf_getAttrib(df.get(), libR_sys::R_RowNamesSymbol) };
+    if !unsafe { is_default_rownames(rn_sexp) } {
+        let key = build_escaped_key_bytes("_row");
+        let n = unsafe { sexp_len(rn_sexp) };
+        let mut bytes = Vec::with_capacity(n * 16);
+        let mut offsets = Vec::with_capacity(n);
+        let rn_type = unsafe { typeof_sexp(rn_sexp) };
+        if rn_type == libR_sys::SEXPTYPE::STRSXP as u32 {
+            for i in 0..n {
+                let s_sexp = unsafe { libR_sys::STRING_ELT(rn_sexp, i as isize) };
+                if unsafe { is_na_string(s_sexp) } { offsets.push((usize::MAX, 0)); }
+                else if let Some(utf8) = unsafe { charsxp_to_utf8_bytes(s_sexp) } {
+                    let start = bytes.len();
+                    bytes.extend_from_slice(utf8);
+                    offsets.push((start, bytes.len() - start));
+                } else { offsets.push((usize::MAX, 0)); }
+            }
+        } else if rn_type == libR_sys::SEXPTYPE::INTSXP as u32 {
+            let p = unsafe { libR_sys::INTEGER(rn_sexp) };
+            for i in 0..n {
+                let v = unsafe { *p.add(i) };
+                if unsafe { is_na_int(v) } { offsets.push((usize::MAX, 0)); }
+                else {
+                    let mut tmp = itoa::Buffer::new();
+                    let s = tmp.format(v);
+                    let start = bytes.len();
+                    bytes.extend_from_slice(s.as_bytes());
+                    offsets.push((start, bytes.len() - start));
+                }
+            }
+        }
+        out.push((key, ThreadSafeColumn { kind: ColumnType::Char, data_ptr: 0, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }) }));
+    }
     Ok(out)
 }
 
 #[inline(always)]
-fn kv_present(row: usize, col: &ThreadSafeColumn) -> bool {
-    match col.kind {
-        ColumnType::Null => false,
-        ColumnType::Char => col
-            .string_arena
-            .as_ref()
-            .map(|a| a.offsets[row].1 > 0)
-            .unwrap_or(false),
-
-        _ => unsafe {
-            let p = col.data_ptr as *const u8;
-            match col.kind {
-                ColumnType::Int => {
-                    let v = *(p as *const i32).add(row);
-                    !is_na_int(v)
-                }
-                ColumnType::Real => {
-                    let v = *(p as *const f64).add(row);
-                    !is_na_real(v) && !is_nan_real(v)
-                }
-                ColumnType::Bool => {
-                    let v = *(p as *const i32).add(row);
-                    !is_na_int(v)
-                }
-                ColumnType::Factor => {
-                    let v = *(p as *const i32).add(row);
-                    if is_na_int(v) || v <= 0 {
-                        false
-                    } else if let Some(ref levels) = col.cached_levels {
-                        let idx = (v as usize).saturating_sub(1);
-                        idx < levels.len()
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            }
-        },
-    }
-}
-
-#[inline(always)]
-fn write_kv(out: &mut JsonWriter, row: usize, key: &[u8], col: &ThreadSafeColumn) {
+fn try_write_kv(out: &mut JsonWriter, row: usize, key: &[u8], col: &ThreadSafeColumn) -> bool {
     match col.kind {
         ColumnType::Char => {
-            let a = col.string_arena.as_ref().unwrap();
-            let (start, len) = a.offsets[row];
-            out.push_bytes(key);
-            escape_json_string_into(&mut out.buf, &a.bytes[start..start + len]);
+            if let Some(ref a) = col.string_arena {
+                let (start, len) = a.offsets[row];
+                if start != usize::MAX {
+                    out.push_bytes(key);
+                    escape_json_string_into(&mut out.buf, &a.bytes[start..start + len]);
+                    return true;
+                }
+            }
+        }
+        ColumnType::JsonRaw => {
+            if let Some(ref a) = col.string_arena {
+                let (start, len) = a.offsets[row];
+                out.push_bytes(key);
+                out.push_bytes(&a.bytes[start..start + len]);
+                return true;
+            }
         }
         ColumnType::Int => unsafe {
-            let p = col.data_ptr as *const i32;
-            out.push_bytes(key);
-            out.push_i32(*p.add(row));
-        }
+            let v = *(col.data_ptr as *const i32).add(row);
+            if !is_na_int(v) {
+                out.push_bytes(key);
+                out.push_i32(v);
+                return true;
+            }
+        },
         ColumnType::Real => unsafe {
-            let p = col.data_ptr as *const f64;
-            out.push_bytes(key);
-            out.push_f64(*p.add(row));
-        }
+            let v = *(col.data_ptr as *const f64).add(row);
+            if !is_na_real(v) && !is_nan_real(v) && v.is_finite() {
+                out.push_bytes(key);
+                out.push_f64(v); // This uses push_f64 (with int check) for attributes
+                return true;
+            }
+        },
         ColumnType::Bool => unsafe {
-            let p = col.data_ptr as *const i32;
-            out.push_bytes(key);
-            out.push_bool(*p.add(row) != 0);
-        }
+            let v = *(col.data_ptr as *const i32).add(row);
+            if !is_na_int(v) {
+                out.push_bytes(key);
+                out.push_bool(v != 0);
+                return true;
+            }
+        },
         ColumnType::Factor => unsafe {
-            let p = col.data_ptr as *const i32;
-            let v = *p.add(row);
-            let levels = col.cached_levels.as_ref().unwrap();
-            let idx = (v as usize).saturating_sub(1);
-            out.push_bytes(key);
-            out.push_bytes(&levels[idx]);
-        }
-        _ => {}
+            let v = *(col.data_ptr as *const i32).add(row);
+            if !is_na_int(v) && v > 0 {
+                if let Some(ref levels) = col.cached_levels {
+                    let idx = (v as usize).saturating_sub(1);
+                    if idx < levels.len() {
+                        out.push_bytes(key);
+                        out.push_bytes(&levels[idx]);
+                        return true;
+                    }
+                }
+            }
+        },
+        ColumnType::Null => {}
     }
+    false
 }
 
-// -------------------- geometry detection/extraction --------------------
+// ------------------------------------------------------------------
+// GEOMETRY LOGIC (ARENA OPTIMIZED)
+// ------------------------------------------------------------------
 
 fn detect_sfc_type_sexp(geom_col_sexp: libR_sys::SEXP) -> SfcType {
     unsafe {
@@ -628,7 +910,7 @@ fn get_row_sfg_type(sfg: libR_sys::SEXP) -> SfcType {
     SfcType::Unknown
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct CoordPtr {
     ptr: usize,
     len: usize,
@@ -636,20 +918,34 @@ struct CoordPtr {
 unsafe impl Send for CoordPtr {}
 unsafe impl Sync for CoordPtr {}
 
-enum RustGeom {
-    Point(f64, f64),
-    MultiPoint(CoordPtr),
-    LineString(CoordPtr),
-    MultiLineString(Vec<CoordPtr>),
-    Polygon(Vec<CoordPtr>),
-    MultiPolygon(Vec<Vec<CoordPtr>>),
-    Null,
+struct GeometryBatch {
+    coords: Vec<CoordPtr>,
+    counts: Vec<usize>, 
 }
-unsafe impl Send for RustGeom {}
-unsafe impl Sync for RustGeom {}
 
-fn extract_geometries_chunk(geom_col: libR_sys::SEXP, sfc_type: SfcType, start: usize, end: usize) -> Vec<RustGeom> {
-    let mut out = Vec::with_capacity(end - start);
+#[derive(Clone, Copy)]
+enum FastGeom {
+    Null,
+    Point(f64, f64),
+    Single(CoordPtr, SfcType),
+    FlatList { start: u32, len: u32, typ: SfcType },
+    MultiPolygon { coords_start: u32, counts_start: u32, n_polys: u32 },
+}
+unsafe impl Send for FastGeom {}
+unsafe impl Sync for FastGeom {}
+
+fn extract_geometries_chunk(
+    geom_col: libR_sys::SEXP, 
+    sfc_type: SfcType, 
+    start: usize, 
+    end: usize
+) -> (GeometryBatch, Vec<FastGeom>) {
+    let capacity_est = end - start;
+    let mut batch = GeometryBatch {
+        coords: Vec::with_capacity(capacity_est * 2),
+        counts: Vec::with_capacity(capacity_est), 
+    };
+    let mut out = Vec::with_capacity(capacity_est);
 
     let get_coord_ptr = |x: libR_sys::SEXP| -> CoordPtr {
         unsafe { CoordPtr { ptr: libR_sys::REAL(x) as usize, len: sexp_len(x) } }
@@ -658,169 +954,183 @@ fn extract_geometries_chunk(geom_col: libR_sys::SEXP, sfc_type: SfcType, start: 
     for i in start..end {
         let sfg = unsafe { libR_sys::VECTOR_ELT(geom_col, i as isize) };
         if sfg == unsafe { libR_sys::R_NilValue } {
-            out.push(RustGeom::Null);
-            continue;
+            out.push(FastGeom::Null); continue;
         }
-
         let row_type = if sfc_type == SfcType::GeometryCollection || sfc_type == SfcType::Unknown {
             get_row_sfg_type(sfg)
-        } else {
-            sfc_type
-        };
+        } else { sfc_type };
 
-        let geom = match row_type {
+        match row_type {
             SfcType::Point => unsafe {
                 if sexp_len(sfg) >= 2 {
                     let p = libR_sys::REAL(sfg);
-                    RustGeom::Point(*p, *p.add(1))
-                } else {
-                    RustGeom::Null
-                }
+                    out.push(FastGeom::Point(*p, *p.add(1)));
+                } else { out.push(FastGeom::Null); }
             },
-            SfcType::MultiPoint => RustGeom::MultiPoint(get_coord_ptr(sfg)),
-            SfcType::LineString => RustGeom::LineString(get_coord_ptr(sfg)),
-            SfcType::MultiLineString => {
+            SfcType::MultiPoint | SfcType::LineString => {
+                out.push(FastGeom::Single(get_coord_ptr(sfg), row_type));
+            },
+            SfcType::MultiLineString | SfcType::Polygon => {
                 let n = unsafe { sexp_len(sfg) };
-                let mut parts = Vec::with_capacity(n);
+                let start_idx = batch.coords.len() as u32;
                 for j in 0..n {
-                    parts.push(get_coord_ptr(unsafe { libR_sys::VECTOR_ELT(sfg, j as isize) }));
+                    batch.coords.push(get_coord_ptr(unsafe { libR_sys::VECTOR_ELT(sfg, j as isize) }));
                 }
-                RustGeom::MultiLineString(parts)
-            }
-            SfcType::Polygon => {
-                let n = unsafe { sexp_len(sfg) };
-                let mut rings = Vec::with_capacity(n);
-                for j in 0..n {
-                    rings.push(get_coord_ptr(unsafe { libR_sys::VECTOR_ELT(sfg, j as isize) }));
-                }
-                RustGeom::Polygon(rings)
+                out.push(FastGeom::FlatList { start: start_idx, len: n as u32, typ: row_type });
             }
             SfcType::MultiPolygon => {
-                let n = unsafe { sexp_len(sfg) };
-                let mut polys = Vec::with_capacity(n);
-                for j in 0..n {
+                let n_polys = unsafe { sexp_len(sfg) };
+                let counts_start = batch.counts.len() as u32;
+                let coords_start = batch.coords.len() as u32;
+                for j in 0..n_polys {
                     let poly_sfg = unsafe { libR_sys::VECTOR_ELT(sfg, j as isize) };
                     let n_rings = unsafe { sexp_len(poly_sfg) };
-                    let mut rings = Vec::with_capacity(n_rings);
+                    batch.counts.push(n_rings);
                     for k in 0..n_rings {
-                        rings.push(get_coord_ptr(unsafe { libR_sys::VECTOR_ELT(poly_sfg, k as isize) }));
+                        batch.coords.push(get_coord_ptr(unsafe { libR_sys::VECTOR_ELT(poly_sfg, k as isize) }));
                     }
-                    polys.push(rings);
                 }
-                RustGeom::MultiPolygon(polys)
+                out.push(FastGeom::MultiPolygon { coords_start, counts_start, n_polys: n_polys as u32 });
             }
-            _ => RustGeom::Null,
-        };
-
-        out.push(geom);
+            _ => out.push(FastGeom::Null),
+        }
     }
-
-    out
+    (batch, out)
 }
 
 fn write_coords_flat(out: &mut JsonWriter, cp: &CoordPtr) {
     let nrow = cp.len / 2;
     let p = cp.ptr as *const f64;
-
     out.push_u8(b'[');
-    for i in 0..nrow {
-        if i > 0 { out.push_u8(b','); }
-        out.push_u8(b'[');
+    if nrow > 0 {
         unsafe {
-            out.push_f64(*p.add(i));
+            // First point
+            out.push_u8(b'[');
+            out.push_f64_direct(*p);
             out.push_u8(b',');
-            out.push_f64(*p.add(i + nrow));
+            out.push_f64_direct(*p.add(nrow));
+            out.push_u8(b']');
+            // Subsequent points
+            for i in 1..nrow {
+                // Combine ",[" to reduce push calls
+                out.push_bytes(b",[");
+                out.push_f64_direct(*p.add(i));
+                out.push_u8(b',');
+                out.push_f64_direct(*p.add(i + nrow));
+                out.push_u8(b']');
+            }
         }
-        out.push_u8(b']');
     }
     out.push_u8(b']');
 }
 
-fn write_geometry_parallel(out: &mut JsonWriter, geom: &RustGeom) {
+fn write_geometry_parallel(out: &mut JsonWriter, geom: &FastGeom, batch: &GeometryBatch) {
     match geom {
-        RustGeom::Point(x, y) => {
+        FastGeom::Point(x, y) => {
             out.push_bytes(br#"{"type":"Point","coordinates":["#);
-            out.push_f64(*x);
-            out.push_u8(b',');
-            out.push_f64(*y);
+            out.push_f64_direct(*x); 
+            out.push_u8(b','); 
+            out.push_f64_direct(*y);
             out.push_bytes(br#"]}"#);
         }
-        RustGeom::MultiPoint(cp) => {
-            out.push_bytes(br#"{"type":"MultiPoint","coordinates":"#);
-            write_coords_flat(out, cp);
-            out.push_u8(b'}');
+        FastGeom::Single(cp, typ) => {
+            match typ {
+                SfcType::MultiPoint => out.push_bytes(br#"{"type":"MultiPoint","coordinates":"#),
+                SfcType::LineString => out.push_bytes(br#"{"type":"LineString","coordinates":"#),
+                _ => { out.push_bytes(b"null"); return; }
+            }
+            write_coords_flat(out, cp); out.push_u8(b'}');
         }
-        RustGeom::LineString(cp) => {
-            out.push_bytes(br#"{"type":"LineString","coordinates":"#);
-            write_coords_flat(out, cp);
-            out.push_u8(b'}');
-        }
-        RustGeom::MultiLineString(parts) => {
-            out.push_bytes(br#"{"type":"MultiLineString","coordinates":["#);
-            for (j, p) in parts.iter().enumerate() {
-                if j > 0 { out.push_u8(b','); }
-                write_coords_flat(out, p);
+        FastGeom::FlatList { start, len, typ } => {
+            match typ {
+                SfcType::MultiLineString => out.push_bytes(br#"{"type":"MultiLineString","coordinates":["#),
+                SfcType::Polygon => out.push_bytes(br#"{"type":"Polygon","coordinates":["#),
+                _ => { out.push_bytes(b"null"); return; }
+            }
+            let s = *start as usize;
+            let l = *len as usize;
+            for (i, cp) in batch.coords[s..s+l].iter().enumerate() {
+                if i > 0 { out.push_u8(b','); }
+                write_coords_flat(out, cp);
             }
             out.push_bytes(br#"]}"#);
         }
-        RustGeom::Polygon(rings) => {
-            out.push_bytes(br#"{"type":"Polygon","coordinates":["#);
-            for (j, r) in rings.iter().enumerate() {
-                if j > 0 { out.push_u8(b','); }
-                write_coords_flat(out, r);
-            }
-            out.push_bytes(br#"]}"#);
-        }
-        RustGeom::MultiPolygon(polys) => {
+        FastGeom::MultiPolygon { coords_start, counts_start, n_polys } => {
             out.push_bytes(br#"{"type":"MultiPolygon","coordinates":["#);
-            for (j, poly) in polys.iter().enumerate() {
-                if j > 0 { out.push_u8(b','); }
+            let mut c_idx = *coords_start as usize;
+            let cnt_start = *counts_start as usize;
+            let cnt_len = *n_polys as usize;
+            for (i, &n_rings) in batch.counts[cnt_start..cnt_start+cnt_len].iter().enumerate() {
+                if i > 0 { out.push_u8(b','); }
                 out.push_u8(b'[');
-                for (k, ring) in poly.iter().enumerate() {
+                for k in 0..n_rings {
                     if k > 0 { out.push_u8(b','); }
-                    write_coords_flat(out, ring);
+                    write_coords_flat(out, &batch.coords[c_idx]);
+                    c_idx += 1;
                 }
                 out.push_u8(b']');
             }
             out.push_bytes(br#"]}"#);
         }
-        RustGeom::Null => out.push_bytes(b"null"),
+        FastGeom::Null => out.push_bytes(b"null"),
     }
 }
 
-fn process_feature_parallel(out: &mut JsonWriter, row: usize, props: &[(Vec<u8>, ThreadSafeColumn)], geom: &RustGeom) {
-    out.push_bytes(FEAT_HEAD);
+// ------------------------------------------------------------------
+// WORKER FUNCTIONS
+// ------------------------------------------------------------------
 
+fn process_feature_parallel(
+    out: &mut JsonWriter, 
+    row: usize, 
+    props: &[(Vec<u8>, ThreadSafeColumn)], 
+    geom: &FastGeom,
+    batch: &GeometryBatch
+) {
+    out.push_bytes(FEAT_HEAD);
     let mut needs_comma = false;
     for (key, col) in props {
-        if kv_present(row, col) {
-            if needs_comma { out.push_u8(b','); }
-            write_kv(out, row, key, col);
-            needs_comma = true;
+        if needs_comma {
+             out.push_u8(b',');
+             if !try_write_kv(out, row, key, col) {
+                 out.buf.pop(); 
+             } else {
+                 needs_comma = true;
+             }
+        } else {
+            if try_write_kv(out, row, key, col) {
+                needs_comma = true;
+            }
         }
     }
-
     out.push_bytes(FEAT_MID);
-    write_geometry_parallel(out, geom);
+    write_geometry_parallel(out, geom, batch);
     out.push_u8(b'}');
 }
 
 fn process_row_generic(out: &mut JsonWriter, row: usize, props: &[(Vec<u8>, ThreadSafeColumn)]) {
     out.push_u8(b'{');
-
     let mut needs_comma = false;
     for (key, col) in props {
-        if kv_present(row, col) {
-            if needs_comma { out.push_u8(b','); }
-            write_kv(out, row, key, col);
-            needs_comma = true;
+        if needs_comma {
+             out.push_u8(b',');
+             if !try_write_kv(out, row, key, col) {
+                 out.buf.pop(); 
+             } else {
+                 needs_comma = true;
+             }
+        } else {
+            if try_write_kv(out, row, key, col) {
+                needs_comma = true;
+            }
         }
     }
-
     out.push_u8(b'}');
 }
 
-// -------------------- sf_geojson_str_impl --------------------
+// ------------------------------------------------------------------
+// EXPORTS
+// ------------------------------------------------------------------
 
 #[extendr]
 fn sf_geojson_str_impl(x: Robj) -> Result<Robj> {
@@ -837,187 +1147,56 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
         robj.set_class(&["geojson", "json"])?;
         return Ok(robj);
     }
+    if !x.inherits("sf") { return rerr("Not an sf object"); }
 
-    if !x.inherits("sf") {
-        return rerr("Not an sf object");
-    }
-
-    let df = x
-        .as_list()
-        .ok_or_else(|| Error::Other("Internal error: invalid object structure (not a list)".to_string()))?;
-
-    if df.len() == 0 {
-        let mut robj = Robj::from("[]");
-        robj.set_class(&["geojson", "json"])?;
-        return Ok(robj);
-    }
-
-    let first_col = df.elt(0).map_err(|_| Error::Other("Not a valid sf object (no columns)".to_string()))?;
-    let n_rows = unsafe { sexp_len(first_col.get()) };
-
+    let df = x.as_list().ok_or_else(|| Error::Other("Invalid sf list".to_string()))?;
+    let n_rows = unsafe { get_df_nrows(x.get()) };
     if n_rows == 0 {
         let mut robj = Robj::from("[]");
         robj.set_class(&["geojson", "json"])?;
         return Ok(robj);
     }
 
-    let names = x.names().ok_or_else(|| Error::Other("Not a valid sf object (no names)".to_string()))?;
+    let names = x.names().ok_or_else(|| Error::Other("No names".to_string()))?;
     let colnames: Vec<String> = names.map(|s| s.to_string()).collect();
-
-    let sfcol_attr = x.get_attrib("sf_column").ok_or_else(|| {
-        Error::Other("Not a valid sf object (missing 'sf_column' attribute)".to_string())
-    })?;
-    let sfcol_vec = sfcol_attr
-        .as_str_vector()
-        .ok_or_else(|| Error::Other("Not a valid sf object ('sf_column' is not character)".to_string()))?;
-
-    if sfcol_vec.is_empty() {
-        return rerr("Not a valid sf object ('sf_column' empty)");
-    }
-
-    let geom_name = &sfcol_vec[0];
-    let geom_idx = colnames
-        .iter()
-        .position(|n| n == geom_name)
-        .ok_or_else(|| Error::Other(format!("Not a valid sf object (Geometry column '{}' not found)", geom_name)))?;
-
-    let geom_col_robj = df.elt(geom_idx).map_err(|_| Error::Other("Internal error: geometry column index invalid".to_string()))?;
-    let geom_col = unsafe { geom_col_robj.get() };
+    let sfcol_attr = x.get_attrib("sf_column").ok_or_else(|| Error::Other("No sf_column".to_string()))?;
+    let sfcol_vec = sfcol_attr.as_str_vector().ok_or_else(|| Error::Other("sf_column not char".to_string()))?;
+    if sfcol_vec.is_empty() { return rerr("sf_column empty"); }
     
-    // FIX: VECSXP check (SEXPTYPE::VECSXP)
-    if unsafe { typeof_sexp(geom_col) } != libR_sys::SEXPTYPE::VECSXP as u32 {
-        return rerr("Not a valid sf object (Geometry column is not a list)");
-    }
+    let geom_name = &sfcol_vec[0];
+    let geom_idx = colnames.iter().position(|n| n == geom_name).ok_or_else(|| Error::Other("Geometry col not found".to_string()))?;
+    let geom_col_robj = df.elt(geom_idx).map_err(|_| Error::Other("Geometry col error".to_string()))?;
+    let geom_col = unsafe { geom_col_robj.get() };
+    if unsafe { typeof_sexp(geom_col) } != libR_sys::SEXPTYPE::VECSXP as u32 { return rerr("Geometry col not a list"); }
 
     let sfc_type = detect_sfc_type_sexp(geom_col);
-    let threads = thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
-    let force_single = n_rows < PAR_THRESHOLD_ROWS
-        || threads == 1
-        || sfc_type == SfcType::GeometryCollection
-        || sfc_type == SfcType::Unknown;
-
-    if force_single {
-        let props = build_property_columns_single(&df, &colnames, geom_idx);
-        let mut out = JsonWriter::with_capacity(256 + n_rows * 1024);
-
-        out.push_bytes(FC_HEAD);
-
-        for i in 0..n_rows {
-            if i > 0 { out.push_u8(b','); }
-
-            out.push_bytes(FEAT_HEAD);
-
-            let mut needs_comma = false;
-            for pc in &props {
-                let start_len = out.buf.len();
-                if needs_comma { out.push_u8(b','); }
-                out.push_bytes(&pc.name_key);
-
-                let wrote = unsafe { write_prop_value_single(&mut out, pc, i) };
-                if !wrote {
-                    out.buf.truncate(start_len);
-                } else {
-                    needs_comma = true;
-                }
-            }
-
-            out.push_bytes(FEAT_MID);
-
-            if let Some(sfg) = unsafe { safe_vector_elt(geom_col, i) } {
-                let row_type = if sfc_type == SfcType::GeometryCollection || sfc_type == SfcType::Unknown {
-                    get_row_sfg_type(sfg)
-                } else {
-                    sfc_type
-                };
-
-                match row_type {
-                    SfcType::Point => {
-                        out.push_u8(b'{');
-                        out.push_bytes(br#""type":"Point","coordinates":"#);
-                        write_point_single(&mut out, sfg);
-                        out.push_u8(b'}');
-                    }
-                    SfcType::MultiPoint => {
-                        out.push_u8(b'{');
-                        out.push_bytes(br#""type":"MultiPoint","coordinates":"#);
-                        write_coords_matrix_single(&mut out, sfg);
-                        out.push_u8(b'}');
-                    }
-                    SfcType::LineString => {
-                        out.push_u8(b'{');
-                        out.push_bytes(br#""type":"LineString","coordinates":"#);
-                        write_coords_matrix_single(&mut out, sfg);
-                        out.push_u8(b'}');
-                    }
-                    SfcType::MultiLineString => {
-                        out.push_u8(b'{');
-                        out.push_bytes(br#""type":"MultiLineString","coordinates":"#);
-                        write_geom_list_single(&mut out, sfg, write_coords_matrix_single);
-                        out.push_u8(b'}');
-                    }
-                    SfcType::Polygon => {
-                        out.push_u8(b'{');
-                        out.push_bytes(br#""type":"Polygon","coordinates":"#);
-                        write_geom_list_single(&mut out, sfg, write_coords_matrix_single);
-                        out.push_u8(b'}');
-                    }
-                    SfcType::MultiPolygon => {
-                        out.push_u8(b'{');
-                        out.push_bytes(br#""type":"MultiPolygon","coordinates":"#);
-                        write_geom_list_single(&mut out, sfg, |o, x| write_geom_list_single(o, x, write_coords_matrix_single));
-                        out.push_u8(b'}');
-                    }
-                    _ => out.push_bytes(b"null"),
-                }
-            } else {
-                out.push_bytes(b"null");
-            }
-
-            out.push_u8(b'}');
-        }
-
-        out.push_bytes(FC_TAIL);
-
-        // --- FIXED: SIZE CHECK 1 ---
-        if out.buf.len() > i32::MAX as usize {
-            return rerr(format!(
-                "Resulting GeoJSON string size ({} bytes) exceeds R's 2GB limit. Please filter your data or write to a file.",
-                out.buf.len()
-            ));
-        }
-        // ---------------------------
-
-        let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(out.buf) });
-        robj.set_class(&["geojson", "json"])?;
-        return Ok(robj);
-    }
-
     let props = build_thread_safe_cols(&df, &colnames, geom_idx, n_rows)?;
-
+    
     let num_chunks = (n_rows + PAR_CHUNK_ROWS - 1) / PAR_CHUNK_ROWS;
     let ranges: Vec<(usize, usize, usize)> = (0..num_chunks)
         .map(|id| (id, id * PAR_CHUNK_ROWS, (id * PAR_CHUNK_ROWS + PAR_CHUNK_ROWS).min(n_rows)))
         .collect();
 
-    let mut chunk_geoms: Vec<(usize, usize, usize, Vec<RustGeom>)> = Vec::with_capacity(num_chunks);
+    let mut chunk_geoms = Vec::with_capacity(num_chunks);
     for (id, start, end) in &ranges {
-        chunk_geoms.push((*id, *start, *end, extract_geometries_chunk(geom_col, sfc_type, *start, *end)));
+        let (batch, geoms) = extract_geometries_chunk(geom_col, sfc_type, *start, *end);
+        chunk_geoms.push((*id, *start, *end, batch, geoms));
     }
 
     let parts_res: Vec<PResult<(usize, Vec<u8>)>> = chunk_geoms
         .into_par_iter()
-        .map(|(chunk_id, start, end, geoms)| {
+        .map(|(chunk_id, start, end, batch, geoms)| {
             let rr = catch_unwind(AssertUnwindSafe(|| {
                 let mut w = JsonWriter::with_capacity((end - start) * 2048);
                 for (local_i, row_i) in (start..end).enumerate() {
                     if local_i > 0 { w.push_u8(b','); }
-                    process_feature_parallel(&mut w, row_i, &props, &geoms[local_i]);
+                    process_feature_parallel(&mut w, row_i, &props, &geoms[local_i], &batch);
                 }
                 (chunk_id, w.buf)
             }));
             match rr {
                 Ok(v) => Ok(v),
-                Err(p) => Err(format!("Internal panic in parallel worker: {}", panic_message(p))),
+                Err(p) => Err(format!("Worker panic: {}", panic_message(p))),
             }
         })
         .collect();
@@ -1029,12 +1208,10 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
             Err(msg) => return rerr(msg),
         }
     }
-
     parts.sort_by_key(|(id, _)| *id);
 
     let total_bytes: usize = parts.iter().map(|(_, v)| v.len()).sum();
     let mut final_out = Vec::with_capacity(total_bytes + n_rows + 64);
-
     final_out.extend_from_slice(FC_HEAD);
     let mut first = true;
     for (_, chunk) in parts {
@@ -1045,21 +1222,13 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
     }
     final_out.extend_from_slice(FC_TAIL);
 
-    // --- FIXED: SIZE CHECK 2 ---
-    if final_out.len() > i32::MAX as usize {
-        return rerr(format!(
-            "Resulting GeoJSON string size ({} bytes) exceeds R's 2GB limit. Please filter your data or write to a file.",
-            final_out.len()
-        ));
-    }
-    // ---------------------------
+    if final_out.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", final_out.len())); }
 
     let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(final_out) });
     robj.set_class(&["geojson", "json"])?;
     Ok(robj)
 }
 
-// -------------------- df_json_str_impl --------------------
 
 #[extendr]
 fn df_json_str_impl(x: Robj) -> Result<Robj> {
@@ -1076,38 +1245,36 @@ fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
         robj.set_class(&["json"])?;
         return Ok(robj);
     }
+    if !x.inherits("data.frame") { return rerr("Not a data.frame"); }
 
-    if !x.inherits("data.frame") {
-        return rerr("Not a dataframe object");
-    }
+    let n_cols = unsafe { sexp_len(x.get()) };
+    let n_rows = unsafe { get_df_nrows(x.get()) };
 
-    let df = x
-        .as_list()
-        .ok_or_else(|| Error::Other("Internal error: invalid object structure (not a list)".to_string()))?;
-
-    if df.len() == 0 {
-        let mut robj = Robj::from("[]");
+    if n_cols == 0 {
+        if n_rows == 0 {
+             let mut robj = Robj::from("[]");
+             robj.set_class(&["json"])?;
+             return Ok(robj);
+        }
+        let mut buf = Vec::with_capacity(n_rows * 3 + 2);
+        buf.push(b'[');
+        for i in 0..n_rows {
+            if i > 0 { buf.push(b','); }
+            buf.extend_from_slice(b"{}");
+        }
+        buf.push(b']');
+        let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(buf) });
         robj.set_class(&["json"])?;
         return Ok(robj);
     }
 
-    let names = x.names().ok_or_else(|| Error::Other("Not a dataframe object (no names)".to_string()))?;
+    let df_list = x.as_list().ok_or_else(|| Error::Other("Invalid df structure".to_string()))?;
+    let names = x.names().ok_or_else(|| Error::Other("No names".to_string()))?;
     let colnames: Vec<String> = names.map(|s| s.to_string()).collect();
-
-    let first_col = df.elt(0).map_err(|_| Error::Other("Not a dataframe object (no columns)".to_string()))?;
-    let n_rows = unsafe { sexp_len(first_col.get()) };
-
-    if n_rows == 0 {
-        let mut robj = Robj::from("[]");
-        robj.set_class(&["json"])?;
-        return Ok(robj);
-    }
-
-    let props = build_thread_safe_cols(&df, &colnames, usize::MAX, n_rows)?;
+    let props = build_thread_safe_cols(&df_list, &colnames, usize::MAX, n_rows)?;
 
     let chunk_size = if n_rows < 10000 { n_rows } else { PAR_CHUNK_ROWS };
     let num_chunks = (n_rows + chunk_size - 1) / chunk_size;
-
     let ranges: Vec<(usize, usize, usize)> = (0..num_chunks)
         .map(|id| (id, id * chunk_size, (id * chunk_size + chunk_size).min(n_rows)))
         .collect();
@@ -1125,7 +1292,7 @@ fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
             }));
             match rr {
                 Ok(v) => Ok(v),
-                Err(p) => Err(format!("Internal panic in parallel worker: {}", panic_message(p))),
+                Err(p) => Err(format!("Worker panic: {}", panic_message(p))),
             }
         })
         .collect();
@@ -1137,7 +1304,6 @@ fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
             Err(msg) => return rerr(msg),
         }
     }
-
     parts.sort_by_key(|(id, _)| *id);
 
     let total_bytes: usize = parts.iter().map(|(_, v)| v.len()).sum();
@@ -1153,22 +1319,26 @@ fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
     }
     final_out.push(b']');
 
-    // --- FIXED: SIZE CHECK 3 ---
-    if final_out.len() > i32::MAX as usize {
-        return rerr(format!(
-            "Resulting JSON string size ({} bytes) exceeds R's 2GB limit. Please filter your data or write to a file.",
-            final_out.len()
-        ));
-    }
-    // ---------------------------
-
+    if final_out.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", final_out.len())); }
     let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(final_out) });
     robj.set_class(&["json"])?;
     Ok(robj)
+}
+
+#[extendr]
+fn obj_json_str_impl(x: Robj) -> Result<Robj> {
+    let est_size = unsafe { sexp_len(x.get()) } * 16 + 64; 
+    let mut w = JsonWriter::with_capacity(est_size);
+    unsafe { serialize_sexp_to_json_buffer(x.get(), &mut w.buf); }
+    if w.buf.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", w.buf.len())); }
+    let mut res = Robj::from(unsafe { String::from_utf8_unchecked(w.buf) });
+    res.set_class(&["json"])?;
+    Ok(res)
 }
 
 extendr_module! {
     mod fastgeojson;
     fn sf_geojson_str_impl;
     fn df_json_str_impl;
+    fn obj_json_str_impl;
 }

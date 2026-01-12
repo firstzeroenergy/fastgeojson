@@ -1,3 +1,12 @@
+# fastgeojson 0.2.0
+
+* **New Function:** Added `as_json()`, a high-performance, generic serializer that handles `sf` objects, data frames, lists, and atomic vectors. It serves as a parallelized, drop-in replacement for `jsonlite::toJSON()`.
+* **Performance Engineering:**
+    * **Geometry Arena:** Implemented a contiguous memory arena for spatial data, flattening nested R lists into a linear structure to eliminate allocation overhead during parallel processing.
+    * **Direct-Heap Writing:** Switched to `ryu::raw` for floating-point formatting, writing bytes directly to the final memory buffer to bypass stack copies.
+    * **LUT Escaping:** Implemented a static Look-Up Table (LUT) for string escaping, enabling O(1) scanning of characters.
+    * **Loop Batching:** Optimized vector writes by batching JSON tokens (e.g., `",["`) to minimize capacity checks.
+
 # fastgeojson 0.1.2
 
 * Fixed `_abort` symbol warnings on macOS and Linux by implementing proper Rust build artifact cleanup.

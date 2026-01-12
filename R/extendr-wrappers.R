@@ -14,5 +14,7 @@ sf_geojson_str_impl <- function(x) .Call(wrap__sf_geojson_str_impl, x)
 
 df_json_str_impl <- function(x) .Call(wrap__df_json_str_impl, x)
 
+obj_json_str_impl <- function(x) .Call(wrap__obj_json_str_impl, x)
+
 
 # nolint end

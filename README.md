@@ -1,12 +1,11 @@
 
 # fastgeojson <img src="man/figures/logo.png" align="right" height="138" />
 
-**High-performance GeoJSON and JSON serialization for `sf` and tabular
-objects**
+**High-performance GeoJSON and JSON serialization for R**
 
 `fastgeojson` provides extremely fast conversion of `sf` objects to
-GeoJSON FeatureCollection strings and rectangular tabular objects
-(`data.frame`, `data.table`, `tibble`) to JSON arrays of row objects.
+GeoJSON FeatureCollections and generic R objects (`data.frame`, lists,
+vectors) to JSON strings.
 
 Implemented in Rust via the **extendr** framework, it uses parallel
 processing and low-level optimizations to deliver **2.4–16× speedups**
@@ -16,10 +15,9 @@ The resulting strings are ready for immediate use in web applications
 (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and
 other R packages that interface with JavaScript.
 
-> **Status: v0.1.2** — Stable for production use and compatible with
-> `shinyapps.io`. This is an early release of `fastgeojson`, so we are
-> actively looking for edge cases; bug reports and feature requests are
-> very welcome.
+> **Status: v0.2.0** — Introduces the “omnivore” `as_json()` function
+> and architectural optimizations (Arena memory layout, Direct-Heap
+> writing).
 
 ## Performance Benchmarks
 
@@ -42,6 +40,35 @@ is better).
 | geojsonsf   |      1920 | —                  |
 | yyjsonr     |       586 | 1×                 |
 | fastgeojson |       238 | 2.5×               |
+
+## Correctness & Compatibility
+
+The `as_json()` function is designed to replicate the behavior of
+`jsonlite::toJSON()` in virtually all edge cases, acting as a
+high-fidelity drop-in replacement.
+
+While exact parity cannot be guaranteed for every possible input
+permutation, `fastgeojson` has been rigorously benchmarked against
+`jsonlite` across a diverse set of complex scenarios. In all tested
+cases below, the outputs are identical.
+
+| Case               | Output (Identical for both)                     | Match? |
+|:-------------------|:------------------------------------------------|:-------|
+| **Simple Numeric** | `[{"x":1},{"x":2.5},{"x":-3}]`                  | ✅     |
+| **Integer NA**     | `[{"x":1},{},{"x":3}]`                          | ✅     |
+| **Double Special** | `[{"x":1},{},{},{},{}]`                         | ✅     |
+| **Logical NA**     | `[{"x":true},{"x":false},{}]`                   | ✅     |
+| **Character NA**   | `[{"ch":"foo"},{},{"ch":"NA"},{"ch":""}]`       | ✅     |
+| **Factor NA**      | `[{"x":"a"},{"x":"b"},{},{"x":"NA"},{"x":"a"}]` | ✅     |
+| **Mixed Types**    | `[{"i":1...},{"ch":""},{"i":3...}]`             | ✅     |
+| **Dates**          | `[{"d":"2020-01-01"},{},{"d":"2020-01-03"}]`    | ✅     |
+| **POSIXct**        | `[{"dt":"2020-01-01 00:00:00"}...]`             | ✅     |
+| **Empty Rows**     | `[]`                                            | ✅     |
+| **Empty Cols**     | `[{},{},{}]`                                    | ✅     |
+| **Special Chars**  | `[{"sp ace":1,"quote\"here":"a"}...]`           | ✅     |
+| **List Column**    | `[{"id":1,"nested":[{"a":1,"b":"x"}]}...]`      | ✅     |
+| **List Atomic**    | `[{"id":1,"vals":[1,2,3]}...]`                  | ✅     |
+| **Row Names**      | `[{"x":1,"y":"a","_row":"r1"}...]`              | ✅     |
 
 ## Installation
 
@@ -90,23 +117,22 @@ the custom repository.
 The core performance advantages come from a carefully designed Rust
 backend:
 
-- **Parallel chunked processing** using `rayon`: large datasets are
-  split into chunks (default ~2048 rows) and processed in parallel
-  across available CPU cores.
-- **Zero-allocation JSON writing** where possible: a custom `JsonWriter`
-  builds output directly into a pre-allocated `Vec<u8>` using fast
-  number formatting (`ryu` for floats, `itoa` for integers) and manual
-  byte pushing.
-- **Thread-safe column preparation**: properties are pre-processed into
-  structures that can be safely shared across threads (e.g., string
-  arenas for character columns, cached escaped factor levels).
-- **Direct access to R vector data**: uses raw pointers to R’s internal
+- **Parallel chunked processing**: Data is split into chunks (~2048
+  rows) and processed in parallel across all CPU cores using `rayon`.
+- **Zero-overhead number formatting**: Floating-point numbers are
+  written directly to the output buffer using `ryu::raw`—eliminating the
+  temporary stack copies found in standard libraries—while integers are
+  handled via `itoa` for maximum serialization throughput.
+- **Thread-safe column preparation**: Attributes are pre-processed into
+  thread-safe structures (String Arenas, cached factors) to allow
+  concurrent access without R API calls.
+- **Direct access to R vector data**: Uses raw pointers to R’s internal
   vectors (INTEGER, REAL, etc.) to avoid copying.
-- **Specialized geometry paths**: separate optimized writers for each
-  geometry type (Point, MultiPoint, LineString, etc.) with unrolled
-  coordinate serialization.
-- **Compact output**: `NA` values in properties are omitted rather than
-  written as `null`, reducing payload size.
+- **Efficient Geometry Flattening**: Complex, deeply nested `sf` objects
+  are reorganized into simple, flat arrays before processing. This
+  bypasses the heavy overhead of navigating R list structures, allowing
+  specialized writers to serialize millions of coordinates in a single,
+  high-speed pass.
 
 These low-level optimizations eliminate the bottlenecks found in
 general-purpose JSON libraries while preserving full compatibility with
@@ -121,25 +147,36 @@ R’s internal serialization when sending data to the browser.
 # FAST: Direct handoff to Leaflet or deck.gl
 observe({
   # fastgeojson serializes in Rust
-  json_data <- sf_geojson_str(large_sf_object)
+  json_data <- as_json(large_sf_object)
   
   # Sent directly to client without re-encoding
   session$sendCustomMessage("updateMap", json_data)
 })
 ```
 
-## Key Functions
+## Core API
 
-- `sf_geojson_str(x)` → GeoJSON FeatureCollection string (class
-  `"geojson" "json"`)
-- `df_json_str(x)` → JSON array of row objects (class `"json"`)
+The package provides a single, unified entry point for all
+serialization:
 
-Both return a single character string and include extensive input
-validation.
+- **`as_json(x)`**: The “omnivore” function. It automatically detects
+  the input type (`sf` object, data frame, list, or vector) and
+  dispatches it to the optimized Rust encoders.
+  - *Returns:* A character string with class `json` (and `geojson` if
+    applicable).
+  - *Behavior:* Designed as a drop-in replacement for
+    `jsonlite::toJSON()`, but significantly faster.
+
+> **Note:** The low-level functions `sf_geojson_str()` and
+> `df_json_str()` are still available for direct dispatch, but
+> `as_json()` is recommended for all standard workflows.
 
 ## Usage Examples
 
-### Converting `sf` to GeoJSON
+### 1. Spatial Data (`sf` objects)
+
+`fastgeojson` automatically detects `sf` objects and outputs standard
+GeoJSON FeatureCollections.
 
 ``` r
 library(sf)
@@ -147,74 +184,95 @@ library(fastgeojson)
 
 nc <- st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
 
-geojson <- sf_geojson_str(nc)
+# Automatically encoded as GeoJSON
+json_out <- as_json(nc)
 
-class(geojson)
+class(json_out)
 #> [1] "geojson" "json"
 
-cat(substr(geojson, 1, 120))
-```
-
-Direct use in Leaflet:
-
-``` r
+# Ready for Leaflet (no additional conversion needed)
 library(leaflet)
-
 leaflet() %>%
   addTiles() %>%
-  addGeoJSON(geojson, fillOpacity = 0.6)
+  addGeoJSON(json_out)
 ```
 
-### Converting tabular data to JSON
+### 2. Tabular Data (Data Frames)
+
+Data frames are serialized as a JSON array of objects (row-oriented),
+optimized for web APIs.
 
 ``` r
-library(fastgeojson)
-
 df <- data.frame(
-  id = 1:3,
-  name = c("Alice", "Bob", "Charlie"),
-  value = c(10.5, 20.1, NA),
-  active = c(TRUE, FALSE, TRUE),
-  stringsAsFactors = FALSE
+  id = 1:2,
+  name = c("Alice", "Bob"),
+  score = c(98.5, NA)
 )
 
-json <- df_json_str(df)
+json_out <- as_json(df)
 
-class(json)
+class(json_out)
 #> [1] "json"
 
-cat(substr(json, 1, 120))
+json_out
+#> [{"id":1,"name":"Alice","score":98.5},{"id":2,"name":"Bob"}]
+```
+
+### 3. General R Objects (Lists & Vectors)
+
+Behaves identically to `jsonlite` for standard R structures, preserving
+types and hierarchies.
+
+``` r
+# Simple vectors
+as_json(c(1, 2, 3))
+#> [1,2,3]
+
+# Nested lists
+data <- list(
+  meta = list(version = "1.0"),
+  payload = c(10, 20)
+)
+
+as_json(data)
+#> {"meta":{"version":["1.0"]},"payload":[10,20]}
+```
+
+## Integration with Shiny
+
+Because `fastgeojson` returns pre-classed `json` strings, you can bypass
+R’s internal serialization when sending data to the browser.
+
+``` r
+# FAST: Direct handoff to Leaflet or deck.gl
+observe({
+  # Use the generic encoder
+  json_data <- as_json(large_sf_object)
+  
+  # Sent directly to client without re-encoding
+  session$sendCustomMessage("updateMap", json_data)
+})
 ```
 
 ## Supported Features
 
-- Column types: integer, double, logical, character, factor
-- Dates / POSIXct: Serialized as seconds since Epoch (1970-01-01)
-- Missing values: `NA` in properties omitted for compact output
-- Geometries: POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON,
-  MULTIPOLYGON
-- Mixed geometry collections fully supported
+`fastgeojson` v0.2.0 supports serialization for a wide range of R data
+types, ensuring compatibility with `jsonlite`:
 
-## Known Limitations
-
-To prioritize stability and speed, the following complex types are
-currently not supported. Future updates may introduce support for these
-types, provided they do not compromise encoding performance.
-
-- List-Columns: Columns containing nested lists (e.g.,
-  `c("tag1", "tag2")` inside a cell) are omitted from the output.
-  - *Workaround:* Flatten list columns into strings before conversion.
-
-  ``` r
-  df$tags <- sapply(df$tags, paste, collapse = ", ")
-  ```
-- POSIXlt: The `POSIXlt` format is not supported due to its underlying
-  list-based structure.
-  - *Workaround:* Convert to standard `POSIXct` or Character.
-
-  ``` r
-  df$time_col <- as.POSIXct(df$time_col)
-  ```
+- **Geometries:** Native support for all `sf` geometry types (POINT,
+  MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON) and
+  GeometryCollections.
+- **Atomic Vectors:** Integer, Double, Logical, Character, Factor.
+- **Complex Structures:** List-Columns, Nested Lists, Matrices, and Data
+  Frames (recursive serialization).
+- **Dates / POSIXt:** Automatically formatted as character strings
+  (e.g., `"2024-01-01"`) to ensure preservation of time zones and
+  formats.
+- **Missing values:** Handled contextually to preserve structure.
+  - **Data Frames:** Fields with `NA` are **omitted** (creating sparse
+    objects) to reduce payload size.
+  - **Vectors/Lists:** `NA` values are converted to `"NA"` strings
+    (e.g., `[1, "NA", 3]`) to preserve strict array length.
 
 ## Development
 

@@ -2,68 +2,84 @@
 % Please edit documentation in R/fastgeojson.R
 \name{fastgeojson}
 \alias{fastgeojson}
+\alias{as_json}
 \alias{sf_geojson_str}
 \alias{df_json_str}
 \title{Fast JSON and GeoJSON serialization for R}
 \usage{
+as_json(x)
+
 sf_geojson_str(x)
 
 df_json_str(x)
 }
 \arguments{
-\item{x}{An input object (e.g., a data.frame or sf object) to serialize.}
+\item{x}{An input object (e.g., a data.frame, sf object, list, or vector) to serialize.}
 }
 \description{
 \code{fastgeojson} provides a high-performance serialization backend for converting
-common R data structures into JSON strings. The core encoders are implemented
+R data structures into JSON strings. The core encoders are implemented
 in Rust using the \strong{extendr} framework and are designed to efficiently handle
-large spatial and tabular datasets.
+large spatial datasets, tabular data, and generic R objects.
 
-The package focuses on two primary use cases:
-\itemize{
-\item Converting \code{sf} objects into GeoJSON FeatureCollections.
-\item Converting rectangular \code{data.frame} objects into JSON arrays.
-}
+\strong{Recommended Usage:}
+All users should use the \code{\link[=as_json]{as_json()}} function. It acts as a universal "omnivore"
+that automatically detects the input type (\code{sf} object, data frame, list, or vector)
+and dispatches it to the correct high-performance Rust encoder.
 
 The resulting JSON is returned as a character string with an appropriate
 class (\code{"geojson"} / \code{"json"}), allowing it to be passed directly to client-side
-JavaScript libraries or web frameworks without additional serialization steps.
+JavaScript libraries or web frameworks (like Shiny or Plumber) without
+additional serialization steps.
 }
 \details{
-For sufficiently large inputs, encoding may be performed in parallel using
-multiple CPU cores via the Rust \strong{rayon} library. Parallel execution is
-enabled automatically based on input size and geometry type.
+For sufficiently large inputs (specifically Data Frames and Spatial objects),
+encoding is performed in parallel using multiple CPU cores via the Rust
+\strong{rayon} library.
 
-By returning pre-serialized JSON strings, these functions allow frameworks
-such as \strong{Shiny} and \strong{Plumber} to avoid redundant re-encoding during data
-transfer, which can significantly reduce server-side overhead in interactive
-or high-throughput applications.
+\strong{Performance Note:}
+There is \strong{no material performance penalty} for using \code{\link[=as_json]{as_json()}} compared to the
+specialized underlying functions. The internal dispatch mechanism has negligible
+overhead (nanoseconds). Users are strongly encouraged to use \code{\link[=as_json]{as_json()}} exclusively
+rather than calling \code{sf_geojson_str()} or \code{df_json_str()} directly.
 }
 \section{Type handling}{
 
 \itemize{
-\item \strong{Numeric:} Written as JSON numbers.
+\item \strong{Numeric:} Written as JSON numbers. Infinite/NaN values are written as strings (\code{"Inf"}, \code{"NaN"}).
 \item \strong{Logical:} Written as JSON booleans.
 \item \strong{Character:} Written as JSON strings with UTF-8 escaping.
+\item \strong{Matrix:} Serialized row-major as an array of arrays.
 \item \strong{Factor:} Encoded using their character levels.
-\item \strong{Missing values:} Missing (\code{NA}) values may be omitted from
-output objects to reduce payload size.
-\item \strong{Geometries:} Supports common \code{sf} geometry types including
-POINT, LINESTRING, POLYGON, and their MULTI variants.
+\item \strong{Missing values (Data Frames):} \code{NA} fields are \strong{omitted} from
+the JSON object to reduce payload size.
+\item \strong{Missing values (Vectors):} \code{NA} values are converted to
+\code{"NA"} strings. This ensures arrays remain fixed-length and avoids mixing
+types (e.g., numbers mixed with nulls) in strict environments.
 }
 }
 
 \examples{
+# 1. Generic Objects (Vectors, Lists, Matrices)
+as_json(list(a = 1, b = "foo", c = NA))
+as_json(matrix(1:4, nrow=2))
+
+# 2. Spatial Data (sf) - Automatically detects and outputs GeoJSON
 if (requireNamespace("sf", quietly = TRUE)) {
-   nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
-   geo_str <- sf_geojson_str(nc)
+     nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
+     geo_str <- as_json(nc)
 }
 
-df <- data.frame(x = runif(10), y = runif(10))
-json_str <- df_json_str(df)
+# 3. Tabular Data (data.frame)
+df <- data.frame(x = runif(5), y = letters[1:5])
+json_str <- as_json(df)
 
 }
 \seealso{
-\code{\link[=sf_geojson_str]{sf_geojson_str()}} for spatial data,
-\code{\link[=df_json_str]{df_json_str()}} for tabular data.
+\code{\link[=as_json]{as_json()}} - The primary function for all serialization tasks.
+
+\strong{Deprecated:} The functions \code{\link[=sf_geojson_str]{sf_geojson_str()}} and \code{\link[=df_json_str]{df_json_str()}} are
+maintained for backward compatibility but may be removed in future updates.
+Users should migrate to \code{\link[=as_json]{as_json()}}, which offers identical performance
+with a unified API.
 }
