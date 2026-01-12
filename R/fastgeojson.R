@@ -1,28 +1,28 @@
-#' Fast JSON and GeoJSON serialization for R
+#' High-Performance 'GeoJSON' and 'JSON' Serialization
 #'
 #' @description
 #' `fastgeojson` provides a high-performance serialization backend for converting
-#' common R data structures into JSON strings. The core encoders are implemented
-#' in Rust using the **extendr** framework and are designed to efficiently handle
+#' common R data structures into 'JSON' strings. The core encoders are implemented
+#' in 'Rust' using the **extendr** framework and are designed to efficiently handle
 #' large spatial and tabular datasets.
 #'
 #' The package focuses on two primary use cases:
 #' \itemize{
-#'   \item Converting `sf` objects into GeoJSON FeatureCollections.
-#'   \item Converting rectangular `data.frame` objects into JSON arrays.
+#'   \item Converting `sf` objects into 'GeoJSON' FeatureCollections.
+#'   \item Converting rectangular `data.frame` objects into 'JSON' arrays.
 #' }
 #'
-#' The resulting JSON is returned as a character string with an appropriate
+#' The resulting 'JSON' is returned as a character string with an appropriate
 #' class (`"geojson"` / `"json"`), allowing it to be passed directly to client-side
-#' JavaScript libraries or web frameworks without additional serialization steps.
+#' 'JavaScript' libraries or web frameworks without additional serialization steps.
 #'
 #' @details
 #' For sufficiently large inputs, encoding may be performed in parallel using
-#' multiple CPU cores via the Rust **rayon** library. Parallel execution is
+#' multiple CPU cores via the 'rayon' library in 'Rust'. Parallel execution is
 #' enabled automatically based on input size and geometry type.
 #'
-#' By returning pre-serialized JSON strings, these functions allow frameworks
-#' such as **Shiny** and **Plumber** to avoid redundant re-encoding during data
+#' By returning pre-serialized 'JSON' strings, these functions allow frameworks
+#' such as 'Shiny' and 'Plumber' to avoid redundant re-encoding during data
 #' transfer, which can significantly reduce server-side overhead in interactive
 #' or high-throughput applications.
 #'
@@ -40,6 +40,12 @@
 #'
 #' @param x An input object (e.g., a data.frame or sf object) to serialize.
 #'
+#' @return
+#' For `sf_geojson_str()`, a length-one character vector with class
+#' `c("geojson", "json")` containing a 'GeoJSON' FeatureCollection string.
+#' For `df_json_str()`, a length-one character vector with class `"json"`
+#' containing a 'JSON' array string.
+#' 
 #' @seealso
 #' [sf_geojson_str()] for spatial data,
 #' [df_json_str()] for tabular data.

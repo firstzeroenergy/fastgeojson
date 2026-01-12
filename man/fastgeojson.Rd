@@ -4,7 +4,7 @@
 \alias{fastgeojson}
 \alias{sf_geojson_str}
 \alias{df_json_str}
-\title{Fast JSON and GeoJSON serialization for R}
+\title{High-Performance 'GeoJSON' and 'JSON' Serialization}
 \usage{
 sf_geojson_str(x)
 
@@ -13,29 +13,35 @@ df_json_str(x)
 \arguments{
 \item{x}{An input object (e.g., a data.frame or sf object) to serialize.}
 }
+\value{
+For \code{sf_geojson_str()}, a length-one character vector with class
+\code{c("geojson", "json")} containing a 'GeoJSON' FeatureCollection string.
+For \code{df_json_str()}, a length-one character vector with class \code{"json"}
+containing a 'JSON' array string.
+}
 \description{
 \code{fastgeojson} provides a high-performance serialization backend for converting
-common R data structures into JSON strings. The core encoders are implemented
-in Rust using the \strong{extendr} framework and are designed to efficiently handle
+common R data structures into 'JSON' strings. The core encoders are implemented
+in 'Rust' using the \strong{extendr} framework and are designed to efficiently handle
 large spatial and tabular datasets.
 
 The package focuses on two primary use cases:
 \itemize{
-\item Converting \code{sf} objects into GeoJSON FeatureCollections.
-\item Converting rectangular \code{data.frame} objects into JSON arrays.
+\item Converting \code{sf} objects into 'GeoJSON' FeatureCollections.
+\item Converting rectangular \code{data.frame} objects into 'JSON' arrays.
 }
 
-The resulting JSON is returned as a character string with an appropriate
+The resulting 'JSON' is returned as a character string with an appropriate
 class (\code{"geojson"} / \code{"json"}), allowing it to be passed directly to client-side
-JavaScript libraries or web frameworks without additional serialization steps.
+'JavaScript' libraries or web frameworks without additional serialization steps.
 }
 \details{
 For sufficiently large inputs, encoding may be performed in parallel using
-multiple CPU cores via the Rust \strong{rayon} library. Parallel execution is
+multiple CPU cores via the 'rayon' library in 'Rust'. Parallel execution is
 enabled automatically based on input size and geometry type.
 
-By returning pre-serialized JSON strings, these functions allow frameworks
-such as \strong{Shiny} and \strong{Plumber} to avoid redundant re-encoding during data
+By returning pre-serialized 'JSON' strings, these functions allow frameworks
+such as 'Shiny' and 'Plumber' to avoid redundant re-encoding during data
 transfer, which can significantly reduce server-side overhead in interactive
 or high-throughput applications.
 }

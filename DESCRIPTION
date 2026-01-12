@@ -1,5 +1,5 @@
 Package: fastgeojson
-Title: High-Performance GeoJSON and JSON Serialization for R
+Title: High-Performance 'GeoJSON' and 'JSON' Serialization
 Version: 0.1.2
 Authors@R: 
     c(person(given = "Alex",
@@ -9,12 +9,12 @@ Authors@R:
       person(given = "The authors of the dependency Rust crates",
              role = c("ctb"),
              comment = "see inst/AUTHORS file for details"))
-Description: Converts R data frames and 'sf' spatial objects into JSON and 
-    GeoJSON strings. The core encoders are implemented in Rust using the 
+Description: Converts R data frames and 'sf' spatial objects into 'JSON' and 
+    'GeoJSON' strings. The core encoders are implemented in 'Rust' using the 
     'extendr' framework and are designed to efficiently serialize large 
-    tabular and spatial datasets. Returns serialized JSON text, allowing 
+    tabular and spatial datasets. Returns serialized 'JSON' text, allowing 
     applications such as 'shiny' or web APIs to transfer data to 
-    client-side JavaScript libraries without additional encoding overhead.
+    client-side 'JavaScript' libraries without additional encoding overhead.
 License: MIT + file LICENSE
 URL: https://github.com/firstzeroenergy/fastgeojson
 BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
