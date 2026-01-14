@@ -1,6 +1,6 @@
 Package: fastgeojson
-Title: High-Performance GeoJSON and JSON Serialization for R
-Version: 0.2.0
+Title: High-Performance 'GeoJSON' and 'JSON' Serialization for R
+Version: 0.2.1
 Authors@R: 
     c(person(given = "Alex",
              family = "Jorion",
@@ -9,12 +9,12 @@ Authors@R:
       person(given = "The authors of the dependency Rust crates",
              role = c("ctb"),
              comment = "see inst/AUTHORS file for details"))
-Description: A high-performance JSON encoder implemented in Rust. It includes a 
+Description: A high-performance 'JSON' encoder implemented in 'Rust'. It includes a 
     universal 'as_json()' function capable of serializing most R objects -- 
-    including 'sf' spatial data, data frames, and nested lists -- often acting 
-    as a drop-in, parallelized alternative to 'jsonlite'. Designed to minimize 
-    latency in 'shiny' apps and web APIs by maximizing memory bandwidth and CPU 
-    utilization.
+    including 'sf' spatial data, data frames, and nested lists. It acts as a 
+    parallelized alternative to 'jsonlite' and includes tools to seamlessly 
+    inject high-performance serialization into existing web frameworks like 
+    'Shiny', 'Leaflet', and 'Highcharter'.
 License: MIT + file LICENSE
 URL: https://github.com/firstzeroenergy/fastgeojson
 BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
@@ -22,9 +22,10 @@ SystemRequirements: Cargo (Rust's package manager), rustc
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
+Imports:
+    jsonlite
 Suggests: 
     testthat (>= 3.0.0),
-    jsonlite,
     sf,
     leaflet
 Config/testthat/edition: 3

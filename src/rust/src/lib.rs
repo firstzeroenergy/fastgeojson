@@ -319,12 +319,14 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
     }
     let robj = Robj::from_sexp(x);
 
+    // Factors
     if robj.inherits("factor") && typeof_sexp(x) == libR_sys::SEXPTYPE::INTSXP as u32 {
         if let Some(levels) = robj.get_attrib("levels") {
             let levels_sexp = levels.get();
             let n_levels = sexp_len(levels_sexp);
             let n = sexp_len(x);
             let p = libR_sys::INTEGER(x);
+
             buf.push(b'[');
             for i in 0..n {
                 if i > 0 { buf.push(b','); }
@@ -344,6 +346,7 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
         }
     }
 
+    // Date / POSIXt
     if robj.inherits("Date") || robj.inherits("POSIXt") {
         if let Ok(char_robj) = call!("format", robj.clone()) {
             serialize_sexp_to_json_buffer(char_robj.get(), buf);
@@ -357,6 +360,7 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
     if r_type == libR_sys::SEXPTYPE::INTSXP as u32 {
         let n = sexp_len(x);
         let p = libR_sys::INTEGER(x);
+
         buf.push(b'[');
         for i in 0..n {
             if i > 0 { buf.push(b','); }
@@ -374,6 +378,7 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
     if r_type == libR_sys::SEXPTYPE::REALSXP as u32 {
         let n = sexp_len(x);
         let p = libR_sys::REAL(x);
+
         buf.push(b'[');
         for i in 0..n {
             if i > 0 { buf.push(b','); }
@@ -387,7 +392,6 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
                     let mut tmp = itoa::Buffer::new();
                     buf.extend_from_slice(tmp.format(v as i32).as_bytes());
                 } else {
-                    // Inline direct write
                     buf.reserve(24);
                     let len = buf.len();
                     let ptr = buf.as_mut_ptr().add(len);
@@ -403,6 +407,7 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
     if r_type == libR_sys::SEXPTYPE::LGLSXP as u32 {
         let n = sexp_len(x);
         let p = libR_sys::LOGICAL(x);
+
         buf.push(b'[');
         for i in 0..n {
             if i > 0 { buf.push(b','); }
@@ -417,6 +422,7 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
 
     if r_type == libR_sys::SEXPTYPE::STRSXP as u32 {
         let n = sexp_len(x);
+        
         buf.push(b'[');
         for i in 0..n {
             if i > 0 { buf.push(b','); }
@@ -469,6 +475,7 @@ unsafe fn serialize_sexp_to_json_buffer(x: libR_sys::SEXP, buf: &mut Vec<u8>) {
         let names_sym = libR_sys::R_NamesSymbol;
         let names_sexp = libR_sys::Rf_getAttrib(x, names_sym);
         let has_names = names_sexp != libR_sys::R_NilValue && sexp_len(names_sexp) == n;
+        
         if has_names {
             buf.push(b'{');
             for i in 0..n {
@@ -616,7 +623,7 @@ fn build_thread_safe_cols(
     df: &List,
     colnames: &[String],
     skip_idx: usize,
-    _expected_rows: usize, 
+    _expected_rows: usize,
 ) -> Result<Vec<(Vec<u8>, ThreadSafeColumn)>> {
     let mut out = Vec::with_capacity(colnames.len() + 1);
 
@@ -626,7 +633,7 @@ fn build_thread_safe_cols(
         let is_date = col.inherits("Date");
         let is_posixt = col.inherits("POSIXt");
         if is_date || is_posixt {
-            col = call!("format", &col).map_err(|e| Error::Other(format!("format failed: {:?}", e)))?;
+             col = call!("format", &col).map_err(|e| Error::Other(format!("format failed: {:?}", e)))?;
         }
         let sexp = unsafe { col.get() };
         let r_type = col.rtype();
@@ -654,7 +661,7 @@ fn build_thread_safe_cols(
                      if r_type == Rtype::Integers {
                          let p = unsafe { libR_sys::INTEGER(sexp) };
                          let v = unsafe { *p.add(idx) };
-                         if unsafe { is_na_int(v) } { bytes.extend_from_slice(b"null"); }
+                         if unsafe { is_na_int(v) } { bytes.extend_from_slice(b"\"NA\""); }
                          else {
                              let mut tmp = itoa::Buffer::new();
                              bytes.extend_from_slice(tmp.format(v).as_bytes());
@@ -662,7 +669,7 @@ fn build_thread_safe_cols(
                      } else if r_type == Rtype::Doubles {
                          let p = unsafe { libR_sys::REAL(sexp) };
                          let v = unsafe { *p.add(idx) };
-                         if unsafe { is_na_real(v) || is_nan_real(v) || !v.is_finite() } { bytes.extend_from_slice(b"null"); }
+                         if unsafe { is_na_real(v) || is_nan_real(v) || !v.is_finite() } { bytes.extend_from_slice(b"\"NA\""); }
                          else {
                              if v.fract() == 0.0 && v >= (i32::MIN as f64) && v <= (i32::MAX as f64) {
                                  let mut tmp = itoa::Buffer::new();
@@ -681,14 +688,14 @@ fn build_thread_safe_cols(
                      } else if r_type == Rtype::Logicals {
                          let p = unsafe { libR_sys::LOGICAL(sexp) };
                          let v = unsafe { *p.add(idx) };
-                         if unsafe { is_na_int(v) } { bytes.extend_from_slice(b"null"); }
+                         if unsafe { is_na_int(v) } { bytes.extend_from_slice(b"\"NA\""); }
                          else if v != 0 { bytes.extend_from_slice(b"true"); }
                          else { bytes.extend_from_slice(b"false"); }
                      } else if r_type == Rtype::Strings {
                          let s = unsafe { libR_sys::STRING_ELT(sexp, idx as isize) };
-                         if unsafe { is_na_string(s) } { bytes.extend_from_slice(b"null"); }
+                         if unsafe { is_na_string(s) } { bytes.extend_from_slice(b"\"NA\""); }
                          else if let Some(utf8) = unsafe { charsxp_to_utf8_bytes(s) } { escape_json_string_into(&mut bytes, utf8); }
-                         else { bytes.extend_from_slice(b"null"); }
+                         else { bytes.extend_from_slice(b"\"NA\""); }
                      } else if r_type == Rtype::List {
                          let item = unsafe { libR_sys::VECTOR_ELT(sexp, idx as isize) };
                          unsafe { serialize_sexp_to_json_buffer(item, &mut bytes); }
@@ -713,7 +720,7 @@ fn build_thread_safe_cols(
                     let mut buf = Vec::with_capacity(32);
                     unsafe {
                         if let Some(bytes) = charsxp_to_utf8_bytes(s) { escape_json_string_into(&mut buf, bytes); }
-                        else { buf.extend_from_slice(b"null"); }
+                        else { buf.extend_from_slice(b"\"NA\""); }
                     }
                     cache.push(buf);
                 }
@@ -827,7 +834,7 @@ fn try_write_kv(out: &mut JsonWriter, row: usize, key: &[u8], col: &ThreadSafeCo
             let v = *(col.data_ptr as *const f64).add(row);
             if !is_na_real(v) && !is_nan_real(v) && v.is_finite() {
                 out.push_bytes(key);
-                out.push_f64(v); // This uses push_f64 (with int check) for attributes
+                out.push_f64(v); 
                 return true;
             }
         },
@@ -1129,19 +1136,115 @@ fn process_row_generic(out: &mut JsonWriter, row: usize, props: &[(Vec<u8>, Thre
 }
 
 // ------------------------------------------------------------------
+// UNBOX POST-PROCESSOR
+// ------------------------------------------------------------------
+
+// Identifies if a JSON fragment [ ... ] contains exactly one primitive (number, bool, null, or string).
+fn check_singleton(slice: &[u8]) -> Option<usize> {
+    if slice.is_empty() { return None; }
+    let mut len = 0;
+    
+    // Case 1: String "..."
+    if slice[0] == b'"' {
+        len += 1;
+        let mut escaped = false;
+        loop {
+            if len >= slice.len() { return None; }
+            let c = slice[len];
+            len += 1;
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                break;
+            }
+        }
+        // Must end with ']' immediately
+        if len < slice.len() && slice[len] == b']' {
+            return Some(len);
+        }
+        return None;
+    }
+
+    // Case 2: Primitive (true, false, null, numbers)
+    // Scan until ']', ensuring no structural chars like ',' or '{' or '['
+    while len < slice.len() {
+        let c = slice[len];
+        if c == b']' {
+            if len == 0 { return None; } // empty []
+            return Some(len);
+        }
+        if c == b',' || c == b'[' || c == b'{' { 
+            return None; 
+        }
+        len += 1;
+    }
+    None
+}
+
+// Scans the valid JSON string and removes brackets from singleton arrays
+fn post_process_unbox(json: String) -> String {
+    let bytes = json.as_bytes();
+    let mut out = Vec::with_capacity(json.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        
+        // Skip strings to avoid processing brackets inside them
+        if b == b'"' {
+            out.push(b);
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                out.push(c);
+                i += 1;
+                if c == b'\\' {
+                    if i < bytes.len() {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                } else if c == b'"' {
+                    break;
+                }
+            }
+        } 
+        // Found Array Start '['
+        else if b == b'[' {
+            // Check content ahead
+            if let Some(len) = check_singleton(&bytes[i+1..]) {
+                // It is a singleton: [ "val" ] or [ 123 ]
+                // Append just the content "val" or 123
+                out.extend_from_slice(&bytes[i+1 .. i+1+len]);
+                // Skip the parsed content + closing bracket ']'
+                i += 1 + len + 1; 
+            } else {
+                // Not a singleton or complex structure: keep '['
+                out.push(b);
+                i += 1;
+            }
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
+// ------------------------------------------------------------------
 // EXPORTS
 // ------------------------------------------------------------------
 
 #[extendr]
-fn sf_geojson_str_impl(x: Robj) -> Result<Robj> {
-    let rr = catch_unwind(AssertUnwindSafe(|| sf_geojson_str_impl_inner(x)));
+fn sf_geojson_str_impl(x: Robj, auto_unbox: bool) -> Result<Robj> {
+    let rr = catch_unwind(AssertUnwindSafe(|| sf_geojson_str_impl_inner(x, auto_unbox)));
     match rr {
         Ok(r) => r,
         Err(p) => rerr(format!("Internal panic: {}", panic_message(p))),
     }
 }
 
-fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
+fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool) -> Result<Robj> {
     if x.is_null() {
         let mut robj = Robj::from("[]");
         robj.set_class(&["geojson", "json"])?;
@@ -1224,22 +1327,25 @@ fn sf_geojson_str_impl_inner(x: Robj) -> Result<Robj> {
 
     if final_out.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", final_out.len())); }
 
-    let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(final_out) });
+    let result_str = unsafe { String::from_utf8_unchecked(final_out) };
+    let final_json = if auto_unbox { post_process_unbox(result_str) } else { result_str };
+
+    let mut robj = Robj::from(final_json);
     robj.set_class(&["geojson", "json"])?;
     Ok(robj)
 }
 
 
 #[extendr]
-fn df_json_str_impl(x: Robj) -> Result<Robj> {
-    let rr = catch_unwind(AssertUnwindSafe(|| df_json_str_impl_inner(x)));
+fn df_json_str_impl(x: Robj, auto_unbox: bool) -> Result<Robj> {
+    let rr = catch_unwind(AssertUnwindSafe(|| df_json_str_impl_inner(x, auto_unbox)));
     match rr {
         Ok(r) => r,
         Err(p) => rerr(format!("Internal panic: {}", panic_message(p))),
     }
 }
 
-fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
+fn df_json_str_impl_inner(x: Robj, auto_unbox: bool) -> Result<Robj> {
     if x.is_null() {
         let mut robj = Robj::from("[]");
         robj.set_class(&["json"])?;
@@ -1320,18 +1426,26 @@ fn df_json_str_impl_inner(x: Robj) -> Result<Robj> {
     final_out.push(b']');
 
     if final_out.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", final_out.len())); }
-    let mut robj = Robj::from(unsafe { String::from_utf8_unchecked(final_out) });
+    
+    let result_str = unsafe { String::from_utf8_unchecked(final_out) };
+    let final_json = if auto_unbox { post_process_unbox(result_str) } else { result_str };
+
+    let mut robj = Robj::from(final_json);
     robj.set_class(&["json"])?;
     Ok(robj)
 }
 
 #[extendr]
-fn obj_json_str_impl(x: Robj) -> Result<Robj> {
+fn obj_json_str_impl(x: Robj, auto_unbox: bool) -> Result<Robj> {
     let est_size = unsafe { sexp_len(x.get()) } * 16 + 64; 
     let mut w = JsonWriter::with_capacity(est_size);
     unsafe { serialize_sexp_to_json_buffer(x.get(), &mut w.buf); }
     if w.buf.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", w.buf.len())); }
-    let mut res = Robj::from(unsafe { String::from_utf8_unchecked(w.buf) });
+    
+    let result_str = unsafe { String::from_utf8_unchecked(w.buf) };
+    let final_json = if auto_unbox { post_process_unbox(result_str) } else { result_str };
+
+    let mut res = Robj::from(final_json);
     res.set_class(&["json"])?;
     Ok(res)
 }

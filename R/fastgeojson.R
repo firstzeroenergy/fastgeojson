@@ -9,7 +9,7 @@
 #' **Recommended Usage:**
 #' All users should use the [as_json()] function. It acts as a universal "omnivore"
 #' that automatically detects the input type (`sf` object, data frame, list, or vector)
-#' and dispatches it to the correct high-performance Rust encoder.
+#' and dispatch it to the correct high-performance Rust encoder.
 #'
 #' The resulting JSON is returned as a character string with an appropriate
 #' class (`"geojson"` / `"json"`), allowing it to be passed directly to client-side
@@ -43,6 +43,20 @@
 #' }
 #'
 #' @param x An input object (e.g., a data.frame, sf object, list, or vector) to serialize.
+#' @param auto_unbox Logical. If `TRUE`, atomic vectors of length 1 are 
+#'   automatically unboxed into scalar JSON values (e.g., `[1]` becomes `1`). 
+#'   If `FALSE` (default), they remain as single-element arrays (e.g., `[1]`).
+#'
+#' @return
+#' \itemize{
+#'   \item `as_json()`: Returns a length-one character vector containing the JSON string.
+#'     If the input is an `sf` object, the result has class `c("geojson", "json")`.
+#'     Otherwise, it has class `"json"`.
+#'   \item `sf_geojson_str()`: Returns a length-one character vector with class
+#'     `c("geojson", "json")` containing a 'GeoJSON' FeatureCollection string.
+#'   \item `df_json_str()`: Returns a length-one character vector with class `"json"`
+#'     containing a 'JSON' array string.
+#' }
 #'
 #' @seealso
 #' [as_json()] - The primary function for all serialization tasks.
@@ -58,7 +72,10 @@
 #' @examples
 #' # 1. Generic Objects (Vectors, Lists, Matrices)
 #' as_json(list(a = 1, b = "foo", c = NA))
-#' as_json(matrix(1:4, nrow=2))
+#' 
+#' # Auto-unbox example
+#' as_json(list(val = 5), auto_unbox = TRUE)  # {"val":5}
+#' as_json(list(val = 5), auto_unbox = FALSE) # {"val":[5]}
 #'
 #' # 2. Spatial Data (sf) - Automatically detects and outputs GeoJSON
 #' if (requireNamespace("sf", quietly = TRUE)) {
@@ -71,28 +88,30 @@
 #' json_str <- as_json(df)
 #'
 #' @useDynLib fastgeojson, .registration = TRUE
+#' @importFrom jsonlite toJSON
 NULL
 
 
 #' @rdname fastgeojson
 #' @export
-as_json <- function(x) {
+as_json <- function(x, auto_unbox = FALSE) {
   # 1. Handle NULL (jsonlite returns {})
   if (is.null(x)) return(structure("{}", class = "json"))
   
   # 2. Optimized Dispatch
   # If it's a known special type, route to the parallelized implementations
-  if (inherits(x, "sf")) return(sf_geojson_str(x))
-  if (inherits(x, "data.frame")) return(df_json_str(x))
+  # NOTE: passing auto_unbox to the specific functions
+  if (inherits(x, "sf")) return(sf_geojson_str(x, auto_unbox = auto_unbox))
+  if (inherits(x, "data.frame")) return(df_json_str(x, auto_unbox = auto_unbox))
   
   # 3. Fallback to Generic
   # Handles vectors, lists, matrices, scalars
-  obj_json_str_impl(x)
+  obj_json_str_impl(x, auto_unbox)
 }
 
 #' @rdname fastgeojson
 #' @export
-sf_geojson_str <- function(x) {
+sf_geojson_str <- function(x, auto_unbox = FALSE) {
   # Handle NULL inputs gracefully
   if (is.null(x)) return(structure("[]", class = c("geojson", "json")))
   
@@ -106,12 +125,12 @@ sf_geojson_str <- function(x) {
     stop("Not a valid sf object (missing 'sf_column' attribute)", call. = FALSE)
   }
   
-  sf_geojson_str_impl(x)
+  sf_geojson_str_impl(x, auto_unbox)
 }
 
 #' @rdname fastgeojson
 #' @export
-df_json_str <- function(x) {
+df_json_str <- function(x, auto_unbox = FALSE) {
   # Handle NULL inputs gracefully
   if (is.null(x)) return(structure("[]", class = "json"))
   
@@ -122,8 +141,66 @@ df_json_str <- function(x) {
   # Short-circuit ONLY if there are no rows.
   if (nrow(x) == 0L) return(structure("[]", class = "json"))
   
-  # REMOVED: The lengths() check. 
-  # It incorrectly flagged matrix columns as ragged.
+  df_json_str_impl(x, auto_unbox)
+}
+
+# -------------------------------------------------------------------------
+# Integration Helpers
+# -------------------------------------------------------------------------
+
+# Internal environment to hold the backup function safely.
+# This avoids adding new variables to the locked jsonlite namespace.
+.fastgeojson_cache <- new.env(parent = emptyenv())
+
+#' Enable Fast GeoJSON Serialization
+#'
+#' This function injects the high-performance `fastgeojson::as_json` serializer 
+#' into the `jsonlite` namespace, replacing the standard `toJSON` function.
+#' This will globally accelerate JSON generation for libraries like Highcharter, 
+#' Leaflet, and Shiny.
+#'
+#' @return No return value. Called for the side effect of modifying the `jsonlite` 
+#'   package namespace to use the optimized serializer.
+#' @export
+enable_fast_json <- function() {
+  pkg_env <- as.environment("package:jsonlite")
   
-  df_json_str_impl(x)
+  # 1. Create a Backup (store in our internal environment)
+  if (!exists("original_toJSON", envir = .fastgeojson_cache)) {
+    assign("original_toJSON", get("toJSON", envir = pkg_env), envir = .fastgeojson_cache)
+  }
+  
+  # 2. Define the Shim
+  # Mimics jsonlite signature. Default auto_unbox=TRUE is standard for web usage.
+  fast_shim <- function(x, ..., auto_unbox = TRUE) {
+    fastgeojson::as_json(x, auto_unbox = auto_unbox)
+  }
+  
+  # 3. Perform the Hot-Swap
+  # We unlock only the specific binding we need to change.
+  unlockBinding("toJSON", pkg_env)
+  assign("toJSON", fast_shim, pkg_env)
+  lockBinding("toJSON", pkg_env)
+  
+  message("fastgeojson is now powering JSON serialization!")
+}
+
+#' Disable Fast GeoJSON Serialization
+#'
+#' Reverts the `jsonlite::toJSON` function to its original state.
+#'
+#' @return No return value. Called for the side effect of restoring the original
+#'   `jsonlite::toJSON` function.
+#' @export
+disable_fast_json <- function() {
+  pkg_env <- as.environment("package:jsonlite")
+  
+  if (exists("original_toJSON", envir = .fastgeojson_cache)) {
+    unlockBinding("toJSON", pkg_env)
+    assign("toJSON", get("original_toJSON", envir = .fastgeojson_cache), pkg_env)
+    lockBinding("toJSON", pkg_env)
+    message("Reverted to standard jsonlite serialization.")
+  } else {
+    warning("Original toJSON not found. Did you enable fast_json first?")
+  }
 }

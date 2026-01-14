@@ -3,9 +3,9 @@
 
 **High-performance GeoJSON and JSON serialization for R**
 
-`fastgeojson` provides extremely fast conversion of `sf` objects to
-GeoJSON FeatureCollections and generic R objects (`data.frame`, lists,
-vectors) to JSON strings.
+`fastgeojson` provides fast conversion of `sf` objects to GeoJSON
+FeatureCollections and generic R objects (`data.frame`, lists, vectors)
+to JSON strings.
 
 Implemented in Rust via the **extendr** framework, it uses parallel
 processing and low-level optimizations to deliver **2.4–16× speedups**
@@ -15,9 +15,10 @@ The resulting strings are ready for immediate use in web applications
 (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and
 other R packages that interface with JavaScript.
 
-> **Status: v0.2.0** — Introduces the “omnivore” `as_json()` function
-> and architectural optimizations (Arena memory layout, Direct-Heap
-> writing).
+> **Status: v0.2.1** — Adds global injection (enable_fast_json()) to
+> directly integrate with Shiny, Leaflet, and Highcharter apps without
+> code changes, and full auto_unbox support for strict jsonlite
+> compatibility.
 
 ## Performance Benchmarks
 
@@ -26,26 +27,62 @@ is better).
 
 ### JSON serialization: 1 million rows × 4 mixed columns
 
-| Package     | Median_ms | Speedup.vs.yyjsonr |
-|:------------|----------:|:-------------------|
-| jsonify     |      1573 | —                  |
-| jsonlite    |      1281 | —                  |
-| yyjsonr     |       235 | 1×                 |
-| fastgeojson |        98 | 2.4×               |
+| Package     | Median_ms | Speedup.vs.jsonlite |
+|:------------|----------:|:--------------------|
+| jsonify     |      1573 | —                   |
+| jsonlite    |      1281 | —                   |
+| yyjsonr     |       235 | 5.5×                |
+| fastgeojson |        98 | 13.1×               |
 
 ### GeoJSON serialization: 1 million point features
 
-| Package     | Median_ms | Speedup.vs.yyjsonr |
-|:------------|----------:|:-------------------|
-| geojsonsf   |      1920 | —                  |
-| yyjsonr     |       586 | 1×                 |
-| fastgeojson |       238 | 2.5×               |
+| Package     | Median_ms | Speedup.vs.geojsonsf |
+|:------------|----------:|:---------------------|
+| geojsonsf   |      1920 | —                    |
+| yyjsonr     |       586 | 3.3×                 |
+| fastgeojson |       238 | 8.1×                 |
+
+## Turbocharge your Shiny Apps
+
+Instantly accelerate your existing R web applications (`Shiny`,
+`Highcharter`, `Leaflet`) by hot-swapping the serialization engine.
+
+> **Experimental Feature:** While `fastgeojson` is designed as a drop-in
+> replacement for `jsonlite`, replacing the core serialization engine of
+> a running application is a significant change.
+>
+> We strongly recommend **testing this in a staging environment** first.
+> If you encounter any rendering issues (e.g., empty charts or missing
+> map layers), you can instantly revert to the standard engine using
+> `disable_fast_json()`.
+
+By calling `enable_fast_json()`, you globally replace the standard
+`jsonlite::toJSON` function with the parallelized `fastgeojson::as_json`
+backend. This upgrades your app’s performance without requiring you to
+refactor existing code.
+
+Simply add this to the top of your `app.R` or `global.R`:
+
+``` r
+library(fastgeojson)
+
+# 🚀 Hot-swap the serialization engine
+# This redirects all jsonlite::toJSON calls to fastgeojson::as_json
+enable_fast_json()
+
+# ... your existing Shiny/Highcharter code now runs on Rust ...
+```
+
+To revert to standard behavior at any time:
+
+``` r
+disable_fast_json()
+```
 
 ## Correctness & Compatibility
 
 The `as_json()` function is designed to replicate the behavior of
-`jsonlite::toJSON()` in virtually all edge cases, acting as a
-high-fidelity drop-in replacement.
+`jsonlite::toJSON()`, acting as a high-fidelity drop-in replacement.
 
 While exact parity cannot be guaranteed for every possible input
 permutation, `fastgeojson` has been rigorously benchmarked against
@@ -138,30 +175,16 @@ These low-level optimizations eliminate the bottlenecks found in
 general-purpose JSON libraries while preserving full compatibility with
 R’s data model.
 
-## Integration with Shiny
-
-Because `fastgeojson` returns pre-classed `json` strings, you can bypass
-R’s internal serialization when sending data to the browser.
-
-``` r
-# FAST: Direct handoff to Leaflet or deck.gl
-observe({
-  # fastgeojson serializes in Rust
-  json_data <- as_json(large_sf_object)
-  
-  # Sent directly to client without re-encoding
-  session$sendCustomMessage("updateMap", json_data)
-})
-```
-
 ## Core API
 
 The package provides a single, unified entry point for all
 serialization:
 
-- **`as_json(x)`**: The “omnivore” function. It automatically detects
-  the input type (`sf` object, data frame, list, or vector) and
-  dispatches it to the optimized Rust encoders.
+- **`as_json(x, auto_unbox = FALSE)`**: The “omnivore” function. It
+  automatically detects the input type (`sf` object, data frame, list,
+  or vector) and dispatches it to the optimized Rust encoders.
+  - *Arguments:* `auto_unbox`: If `TRUE`, atomic vectors of length 1 are
+    automatically unboxed into scalar values (e.g., `[1]` becomes `1`).
   - *Returns:* A character string with class `json` (and `geojson` if
     applicable).
   - *Behavior:* Designed as a drop-in replacement for
@@ -218,24 +241,27 @@ json_out
 #> [{"id":1,"name":"Alice","score":98.5},{"id":2,"name":"Bob"}]
 ```
 
-### 3. General R Objects (Lists & Vectors)
+### 3. General R Objects & Auto-Unboxing
 
-Behaves identically to `jsonlite` for standard R structures, preserving
-types and hierarchies.
+Designed to behave similar to `jsonlite` for standard R structures,
+preserving types and hierarchies.
 
 ``` r
-# Simple vectors
-as_json(c(1, 2, 3))
-#> [1,2,3]
+# Default behavior (auto_unbox = FALSE)
+as_json(list(val = 5), auto_unbox = FALSE)
+#> {"val":[5]}
+
+# With unboxing (auto_unbox = TRUE)
+as_json(list(val = 5), auto_unbox = TRUE)
+#> {"val":5}
 
 # Nested lists
 data <- list(
   meta = list(version = "1.0"),
   payload = c(10, 20)
 )
-
-as_json(data)
-#> {"meta":{"version":["1.0"]},"payload":[10,20]}
+as_json(data, auto_unbox = TRUE)
+#> {"meta":{"version":"1.0"},"payload":[10,20]}
 ```
 
 ## Integration with Shiny
@@ -256,8 +282,8 @@ observe({
 
 ## Supported Features
 
-`fastgeojson` v0.2.0 supports serialization for a wide range of R data
-types, ensuring compatibility with `jsonlite`:
+`fastgeojson` v0.2.1 supports serialization for a wide range of R data
+types:
 
 - **Geometries:** Native support for all `sf` geometry types (POINT,
   MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON) and

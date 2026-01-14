@@ -7,14 +7,29 @@
 \alias{df_json_str}
 \title{Fast JSON and GeoJSON serialization for R}
 \usage{
-as_json(x)
+as_json(x, auto_unbox = FALSE)
 
-sf_geojson_str(x)
+sf_geojson_str(x, auto_unbox = FALSE)
 
-df_json_str(x)
+df_json_str(x, auto_unbox = FALSE)
 }
 \arguments{
 \item{x}{An input object (e.g., a data.frame, sf object, list, or vector) to serialize.}
+
+\item{auto_unbox}{Logical. If \code{TRUE}, atomic vectors of length 1 are
+automatically unboxed into scalar JSON values (e.g., \verb{[1]} becomes \code{1}).
+If \code{FALSE} (default), they remain as single-element arrays (e.g., \verb{[1]}).}
+}
+\value{
+\itemize{
+\item \code{as_json()}: Returns a length-one character vector containing the JSON string.
+If the input is an \code{sf} object, the result has class \code{c("geojson", "json")}.
+Otherwise, it has class \code{"json"}.
+\item \code{sf_geojson_str()}: Returns a length-one character vector with class
+\code{c("geojson", "json")} containing a 'GeoJSON' FeatureCollection string.
+\item \code{df_json_str()}: Returns a length-one character vector with class \code{"json"}
+containing a 'JSON' array string.
+}
 }
 \description{
 \code{fastgeojson} provides a high-performance serialization backend for converting
@@ -25,7 +40,7 @@ large spatial datasets, tabular data, and generic R objects.
 \strong{Recommended Usage:}
 All users should use the \code{\link[=as_json]{as_json()}} function. It acts as a universal "omnivore"
 that automatically detects the input type (\code{sf} object, data frame, list, or vector)
-and dispatches it to the correct high-performance Rust encoder.
+and dispatch it to the correct high-performance Rust encoder.
 
 The resulting JSON is returned as a character string with an appropriate
 class (\code{"geojson"} / \code{"json"}), allowing it to be passed directly to client-side
@@ -62,7 +77,10 @@ types (e.g., numbers mixed with nulls) in strict environments.
 \examples{
 # 1. Generic Objects (Vectors, Lists, Matrices)
 as_json(list(a = 1, b = "foo", c = NA))
-as_json(matrix(1:4, nrow=2))
+
+# Auto-unbox example
+as_json(list(val = 5), auto_unbox = TRUE)  # {"val":5}
+as_json(list(val = 5), auto_unbox = FALSE) # {"val":[5]}
 
 # 2. Spatial Data (sf) - Automatically detects and outputs GeoJSON
 if (requireNamespace("sf", quietly = TRUE)) {
