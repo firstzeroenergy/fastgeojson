@@ -1,7 +1,3 @@
-library(testthat)
-library(fastgeojson)
-library(jsonlite)
-
 test_that("as_json serializes data.frames correctly", {
   # 1. Simple case
   df <- data.frame(id = 1:2, val = c("A", "B"))

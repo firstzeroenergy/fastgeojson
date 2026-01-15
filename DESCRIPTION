@@ -9,12 +9,11 @@ Authors@R:
       person(given = "The authors of the dependency Rust crates",
              role = c("ctb"),
              comment = "see inst/AUTHORS file for details"))
-Description: A high-performance 'JSON' encoder implemented in 'Rust'. It includes a 
-    universal 'as_json()' function capable of serializing most R objects -- 
-    including 'sf' spatial data, data frames, and nested lists. It acts as a 
-    parallelized alternative to 'jsonlite' and includes tools to seamlessly 
-    inject high-performance serialization into existing web frameworks like 
-    'Shiny', 'Leaflet', and 'Highcharter'.
+Description: A high-performance 'JSON' encoder implemented in 'Rust'. It provides 
+    a universal 'as_json()' function capable of serializing most R objects -- 
+    including 'sf' spatial data, data frames, and nested lists. Leveraging a 
+    performant 'Rust' backend, it generates compliant 'JSON' strings optimized 
+    for direct use in web frameworks like 'Shiny', 'Leaflet', and 'Highcharter'.
 License: MIT + file LICENSE
 URL: https://github.com/firstzeroenergy/fastgeojson
 BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
@@ -22,10 +21,9 @@ SystemRequirements: Cargo (Rust's package manager), rustc
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
-Imports:
-    jsonlite
 Suggests: 
     testthat (>= 3.0.0),
+    jsonlite,
     sf,
     leaflet
 Config/testthat/edition: 3

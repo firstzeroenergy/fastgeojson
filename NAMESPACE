@@ -2,8 +2,5 @@
 
 export(as_json)
 export(df_json_str)
-export(disable_fast_json)
-export(enable_fast_json)
 export(sf_geojson_str)
-importFrom(jsonlite,toJSON)
 useDynLib(fastgeojson, .registration = TRUE)

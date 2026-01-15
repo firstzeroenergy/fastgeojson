@@ -1,7 +1,6 @@
 # fastgeojson 0.2.1
 
-* **Global Injection:** Added `enable_fast_json()` and `disable_fast_json()`. These functions allow users to "hot-swap" the serialization engine, injecting `fastgeojson` into `jsonlite::toJSON`. This accelerates existing applications (Shiny, Highcharter, Leaflet) without requiring any code changes.
-* **API Compatibility:** Updated `as_json()` to support the `auto_unbox` argument. This ensures full compatibility with `htmlwidgets` expectations, allowing control over whether singleton vectors are serialized as scalars (e.g., `1`) or arrays (e.g., `[1]`).
+* **Scalar Serialization Support:** Extended the `as_json()` interface to include the `auto_unbox` argument, enabling the serialization of length-one atomic vectors as native JSON scalars. This provides deterministic control over data typing, allowing specific distinction between singleton arrays and primitive scalar values in the output payload.
 
 # fastgeojson 0.2.0
 

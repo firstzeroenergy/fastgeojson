@@ -40,7 +40,7 @@ $(STATLIB):
 	export CARGO_HOME="$(CURDIR)/rust/.cargo" && \
 	if [ -f "rust/vendor.tar.xz" ]; then \
 		echo "Building OFFLINE (Windows)..." && \
-		cargo build --target=$(TARGET) --lib --release --offline \
+		cargo build --target=$(TARGET) --lib --release --offline --locked \
 		  --manifest-path=rust/Cargo.toml \
 		  --target-dir=$(TARGET_DIR); \
 	else \

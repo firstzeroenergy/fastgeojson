@@ -34,7 +34,7 @@ $(STATLIB):
 	CARGO_HOME="`pwd`/rust/.cargo"; export CARGO_HOME; \
 	if [ -f rust/vendor.tar.xz ]; then \
 		echo "Building OFFLINE."; \
-		cargo build --release --lib --offline \
+		cargo build --release --lib --offline --locked \
 			--manifest-path=rust/Cargo.toml \
 			--target-dir $(TARGET_DIR); \
 	else \

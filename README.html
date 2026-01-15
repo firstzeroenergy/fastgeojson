@@ -612,15 +612,13 @@ objects to GeoJSON FeatureCollections and generic R objects
 uses parallel processing and low-level optimizations to deliver
 <strong>2.4–16× speedups</strong> over existing R solutions on large
 datasets.</p>
-<p>The resulting strings are ready for immediate use in web applications
-(Shiny, Plumber), direct integration with
-<code>leaflet::addGeoJSON()</code>, and other R packages that interface
-with JavaScript.</p>
+<p>The resulting strings are ready for use in web applications (Shiny,
+Plumber), direct integration with <code>leaflet::addGeoJSON()</code>,
+and other R packages that interface with JavaScript.</p>
 <blockquote>
-<p><strong>Status: v0.2.1</strong> — Adds global injection
-(enable_fast_json()) to directly integrate with Shiny, Leaflet, and
-Highcharter apps without code changes, and full auto_unbox support for
-strict jsonlite compatibility.</p>
+<p><strong>Status: v0.2.1</strong> — Adds the auto_unbox argument to
+as_json(), giving users explicit control over whether single-element
+vectors are serialized as JSON scalars or arrays.</p>
 </blockquote>
 <h2 id="performance-benchmarks">Performance Benchmarks</h2>
 <p>Benchmarks conducted with <code>microbenchmark</code> (times in
@@ -686,43 +684,13 @@ serialization: 1 million point features</h3>
 </tr>
 </tbody>
 </table>
-<h2 id="turbocharge-your-shiny-apps">Turbocharge your Shiny Apps</h2>
-<p>Instantly accelerate your existing R web applications
-(<code>Shiny</code>, <code>Highcharter</code>, <code>Leaflet</code>) by
-hot-swapping the serialization engine.</p>
-<blockquote>
-<p><strong>Experimental Feature:</strong> While <code>fastgeojson</code>
-is designed as a drop-in replacement for <code>jsonlite</code>,
-replacing the core serialization engine of a running application is a
-significant change.</p>
-<p>We strongly recommend <strong>testing this in a staging
-environment</strong> first. If you encounter any rendering issues (e.g.,
-empty charts or missing map layers), you can instantly revert to the
-standard engine using <code>disable_fast_json()</code>.</p>
-</blockquote>
-<p>By calling <code>enable_fast_json()</code>, you globally replace the
-standard <code>jsonlite::toJSON</code> function with the parallelized
-<code>fastgeojson::as_json</code> backend. This upgrades your app’s
-performance without requiring you to refactor existing code.</p>
-<p>Simply add this to the top of your <code>app.R</code> or
-<code>global.R</code>:</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
-<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a></span>
-<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="co"># 🚀 Hot-swap the serialization engine</span></span>
-<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a><span class="co"># This redirects all jsonlite::toJSON calls to fastgeojson::as_json</span></span>
-<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a><span class="fu">enable_fast_json</span>()</span>
-<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a></span>
-<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="co"># ... your existing Shiny/Highcharter code now runs on Rust ...</span></span></code></pre></div>
-<p>To revert to standard behavior at any time:</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">disable_fast_json</span>()</span></code></pre></div>
 <h2 id="correctness--compatibility">Correctness &amp; Compatibility</h2>
 <p>The <code>as_json()</code> function is designed to replicate the
-behavior of <code>jsonlite::toJSON()</code>, acting as a high-fidelity
-drop-in replacement.</p>
+behavior of the default settings of <code>jsonlite::toJSON()</code>.</p>
 <p>While exact parity cannot be guaranteed for every possible input
-permutation, <code>fastgeojson</code> has been rigorously benchmarked
-against <code>jsonlite</code> across a diverse set of complex scenarios.
-In all tested cases below, the outputs are identical.</p>
+permutation, <code>fastgeojson</code> has been benchmarked against
+<code>jsonlite</code> across a diverse set of complex scenarios. In all
+tested cases below, the outputs are identical.</p>
 <table>
 <thead>
 <tr>
@@ -813,16 +781,16 @@ In all tested cases below, the outputs are identical.</p>
 <h3 id="from-cran-recommended">From CRAN (Recommended)</h3>
 <p>Once available on CRAN, you can install the stable version
 directly:</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
 <h3 id="development-version-r-universe">Development Version
 (R-universe)</h3>
 <p>To install the latest development version or pre-compiled binaries
 for Windows/macOS (no Rust required) before the CRAN release:</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>))</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>))</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;fastgeojson&quot;</span>)</span></code></pre></div>
 <h2 id="deploying-to-shinyappsio">Deploying to shinyapps.io</h2>
 <p><strong>Note:</strong> If you are using the CRAN version, deployment
 works automatically.</p>
@@ -830,10 +798,10 @@ works automatically.</p>
 R-universe, you must tell shinyapps.io where to find the package.
 <strong>The Fix:</strong> Add the following lines to the very top of
 your <code>app.R</code> (or <code>global.R</code>) file.</p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>))</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">repos =</span> <span class="fu">c</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="at">firstzero =</span> <span class="st">&quot;https://firstzeroenergy.r-universe.dev&quot;</span>,</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">CRAN =</span> <span class="st">&quot;https://cloud.r-project.org&quot;</span></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>))</span></code></pre></div>
 <p>This ensures the build server can find and install
 <code>fastgeojson</code> from the custom repository.</p>
 <h2 id="main-features-of-the-rust-implementation">Main Features of the
@@ -892,70 +860,70 @@ for all standard workflows.</p>
 objects)</h3>
 <p><code>fastgeojson</code> automatically detects <code>sf</code>
 objects and outputs standard GeoJSON FeatureCollections.</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">library</span>(sf)</span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a></span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>nc <span class="ot">&lt;-</span> <span class="fu">st_read</span>(<span class="fu">system.file</span>(<span class="st">&quot;shape/nc.shp&quot;</span>, <span class="at">package =</span> <span class="st">&quot;sf&quot;</span>), <span class="at">quiet =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a></span>
-<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a><span class="co"># Automatically encoded as GeoJSON</span></span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>json_out <span class="ot">&lt;-</span> <span class="fu">as_json</span>(nc)</span>
-<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a></span>
-<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a><span class="fu">class</span>(json_out)</span>
-<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a><span class="co">#&gt; [1] &quot;geojson&quot; &quot;json&quot;</span></span>
-<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a></span>
-<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a><span class="co"># Ready for Leaflet (no additional conversion needed)</span></span>
-<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a><span class="fu">library</span>(leaflet)</span>
-<span id="cb6-14"><a href="#cb6-14" tabindex="-1"></a><span class="fu">leaflet</span>() <span class="sc">%&gt;%</span></span>
-<span id="cb6-15"><a href="#cb6-15" tabindex="-1"></a>  <span class="fu">addTiles</span>() <span class="sc">%&gt;%</span></span>
-<span id="cb6-16"><a href="#cb6-16" tabindex="-1"></a>  <span class="fu">addGeoJSON</span>(json_out)</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">library</span>(sf)</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">library</span>(fastgeojson)</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>nc <span class="ot">&lt;-</span> <span class="fu">st_read</span>(<span class="fu">system.file</span>(<span class="st">&quot;shape/nc.shp&quot;</span>, <span class="at">package =</span> <span class="st">&quot;sf&quot;</span>), <span class="at">quiet =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a><span class="co"># Automatically encoded as GeoJSON</span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>json_out <span class="ot">&lt;-</span> <span class="fu">as_json</span>(nc)</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a><span class="fu">class</span>(json_out)</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a><span class="co">#&gt; [1] &quot;geojson&quot; &quot;json&quot;</span></span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a><span class="co"># Ready for Leaflet (no additional conversion needed)</span></span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a><span class="fu">library</span>(leaflet)</span>
+<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a><span class="fu">leaflet</span>() <span class="sc">%&gt;%</span></span>
+<span id="cb4-15"><a href="#cb4-15" tabindex="-1"></a>  <span class="fu">addTiles</span>() <span class="sc">%&gt;%</span></span>
+<span id="cb4-16"><a href="#cb4-16" tabindex="-1"></a>  <span class="fu">addGeoJSON</span>(json_out)</span></code></pre></div>
 <h3 id="id_2-tabular-data-data-frames">2. Tabular Data (Data
 Frames)</h3>
 <p>Data frames are serialized as a JSON array of objects (row-oriented),
 optimized for web APIs.</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="at">id =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>,</span>
-<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">name =</span> <span class="fu">c</span>(<span class="st">&quot;Alice&quot;</span>, <span class="st">&quot;Bob&quot;</span>),</span>
-<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">score =</span> <span class="fu">c</span>(<span class="fl">98.5</span>, <span class="cn">NA</span>)</span>
-<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>)</span>
-<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a></span>
-<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>json_out <span class="ot">&lt;-</span> <span class="fu">as_json</span>(df)</span>
-<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a></span>
-<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a><span class="fu">class</span>(json_out)</span>
-<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a><span class="co">#&gt; [1] &quot;json&quot;</span></span>
-<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a></span>
-<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a>json_out</span>
-<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a><span class="co">#&gt; [{&quot;id&quot;:1,&quot;name&quot;:&quot;Alice&quot;,&quot;score&quot;:98.5},{&quot;id&quot;:2,&quot;name&quot;:&quot;Bob&quot;}]</span></span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="at">id =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>,</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">name =</span> <span class="fu">c</span>(<span class="st">&quot;Alice&quot;</span>, <span class="st">&quot;Bob&quot;</span>),</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">score =</span> <span class="fu">c</span>(<span class="fl">98.5</span>, <span class="cn">NA</span>)</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>)</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a></span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>json_out <span class="ot">&lt;-</span> <span class="fu">as_json</span>(df)</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a></span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a><span class="fu">class</span>(json_out)</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a><span class="co">#&gt; [1] &quot;json&quot;</span></span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a></span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>json_out</span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a><span class="co">#&gt; [{&quot;id&quot;:1,&quot;name&quot;:&quot;Alice&quot;,&quot;score&quot;:98.5},{&quot;id&quot;:2,&quot;name&quot;:&quot;Bob&quot;}]</span></span></code></pre></div>
 <h3 id="id_3-general-r-objects--auto-unboxing">3. General R Objects
 &amp; Auto-Unboxing</h3>
 <p>Designed to behave similar to <code>jsonlite</code> for standard R
 structures, preserving types and hierarchies.</p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a><span class="co"># Default behavior (auto_unbox = FALSE)</span></span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a><span class="fu">as_json</span>(<span class="fu">list</span>(<span class="at">val =</span> <span class="dv">5</span>), <span class="at">auto_unbox =</span> <span class="cn">FALSE</span>)</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a><span class="co">#&gt; {&quot;val&quot;:[5]}</span></span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a></span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a><span class="co"># With unboxing (auto_unbox = TRUE)</span></span>
-<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a><span class="fu">as_json</span>(<span class="fu">list</span>(<span class="at">val =</span> <span class="dv">5</span>), <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a><span class="co">#&gt; {&quot;val&quot;:5}</span></span>
-<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a></span>
-<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a><span class="co"># Nested lists</span></span>
-<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a>data <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
-<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a>  <span class="at">meta =</span> <span class="fu">list</span>(<span class="at">version =</span> <span class="st">&quot;1.0&quot;</span>),</span>
-<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a>  <span class="at">payload =</span> <span class="fu">c</span>(<span class="dv">10</span>, <span class="dv">20</span>)</span>
-<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a>)</span>
-<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a><span class="fu">as_json</span>(data, <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb8-15"><a href="#cb8-15" tabindex="-1"></a><span class="co">#&gt; {&quot;meta&quot;:{&quot;version&quot;:&quot;1.0&quot;},&quot;payload&quot;:[10,20]}</span></span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="co"># Default behavior (auto_unbox = FALSE)</span></span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="fu">as_json</span>(<span class="fu">list</span>(<span class="at">val =</span> <span class="dv">5</span>), <span class="at">auto_unbox =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a><span class="co">#&gt; {&quot;val&quot;:[5]}</span></span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a></span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a><span class="co"># With unboxing (auto_unbox = TRUE)</span></span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a><span class="fu">as_json</span>(<span class="fu">list</span>(<span class="at">val =</span> <span class="dv">5</span>), <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a><span class="co">#&gt; {&quot;val&quot;:5}</span></span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a></span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a><span class="co"># Nested lists</span></span>
+<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>data <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
+<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>  <span class="at">meta =</span> <span class="fu">list</span>(<span class="at">version =</span> <span class="st">&quot;1.0&quot;</span>),</span>
+<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a>  <span class="at">payload =</span> <span class="fu">c</span>(<span class="dv">10</span>, <span class="dv">20</span>)</span>
+<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a>)</span>
+<span id="cb6-14"><a href="#cb6-14" tabindex="-1"></a><span class="fu">as_json</span>(data, <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb6-15"><a href="#cb6-15" tabindex="-1"></a><span class="co">#&gt; {&quot;meta&quot;:{&quot;version&quot;:&quot;1.0&quot;},&quot;payload&quot;:[10,20]}</span></span></code></pre></div>
 <h2 id="integration-with-shiny">Integration with Shiny</h2>
 <p>Because <code>fastgeojson</code> returns pre-classed
 <code>json</code> strings, you can bypass R’s internal serialization
 when sending data to the browser.</p>
-<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a><span class="co"># FAST: Direct handoff to Leaflet or deck.gl</span></span>
-<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a><span class="fu">observe</span>({</span>
-<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="co"># Use the generic encoder</span></span>
-<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  json_data <span class="ot">&lt;-</span> <span class="fu">as_json</span>(large_sf_object)</span>
-<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>  </span>
-<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>  <span class="co"># Sent directly to client without re-encoding</span></span>
-<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a>  session<span class="sc">$</span><span class="fu">sendCustomMessage</span>(<span class="st">&quot;updateMap&quot;</span>, json_data)</span>
-<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a>})</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="co"># FAST: Direct handoff to Leaflet or deck.gl</span></span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a><span class="fu">observe</span>({</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="co"># Use the generic encoder</span></span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  json_data <span class="ot">&lt;-</span> <span class="fu">as_json</span>(large_sf_object)</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  </span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="co"># Sent directly to client without re-encoding</span></span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  session<span class="sc">$</span><span class="fu">sendCustomMessage</span>(<span class="st">&quot;updateMap&quot;</span>, json_data)</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>})</span></code></pre></div>
 <h2 id="supported-features">Supported Features</h2>
 <p><code>fastgeojson</code> v0.2.1 supports serialization for a wide
 range of R data types:</p>

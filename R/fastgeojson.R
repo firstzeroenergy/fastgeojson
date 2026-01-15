@@ -88,7 +88,6 @@
 #' json_str <- as_json(df)
 #'
 #' @useDynLib fastgeojson, .registration = TRUE
-#' @importFrom jsonlite toJSON
 NULL
 
 
@@ -142,65 +141,4 @@ df_json_str <- function(x, auto_unbox = FALSE) {
   if (nrow(x) == 0L) return(structure("[]", class = "json"))
   
   df_json_str_impl(x, auto_unbox)
-}
-
-# -------------------------------------------------------------------------
-# Integration Helpers
-# -------------------------------------------------------------------------
-
-# Internal environment to hold the backup function safely.
-# This avoids adding new variables to the locked jsonlite namespace.
-.fastgeojson_cache <- new.env(parent = emptyenv())
-
-#' Enable Fast GeoJSON Serialization
-#'
-#' This function injects the high-performance `fastgeojson::as_json` serializer 
-#' into the `jsonlite` namespace, replacing the standard `toJSON` function.
-#' This will globally accelerate JSON generation for libraries like Highcharter, 
-#' Leaflet, and Shiny.
-#'
-#' @return No return value. Called for the side effect of modifying the `jsonlite` 
-#'   package namespace to use the optimized serializer.
-#' @export
-enable_fast_json <- function() {
-  pkg_env <- as.environment("package:jsonlite")
-  
-  # 1. Create a Backup (store in our internal environment)
-  if (!exists("original_toJSON", envir = .fastgeojson_cache)) {
-    assign("original_toJSON", get("toJSON", envir = pkg_env), envir = .fastgeojson_cache)
-  }
-  
-  # 2. Define the Shim
-  # Mimics jsonlite signature. Default auto_unbox=TRUE is standard for web usage.
-  fast_shim <- function(x, ..., auto_unbox = TRUE) {
-    fastgeojson::as_json(x, auto_unbox = auto_unbox)
-  }
-  
-  # 3. Perform the Hot-Swap
-  # We unlock only the specific binding we need to change.
-  unlockBinding("toJSON", pkg_env)
-  assign("toJSON", fast_shim, pkg_env)
-  lockBinding("toJSON", pkg_env)
-  
-  message("fastgeojson is now powering JSON serialization!")
-}
-
-#' Disable Fast GeoJSON Serialization
-#'
-#' Reverts the `jsonlite::toJSON` function to its original state.
-#'
-#' @return No return value. Called for the side effect of restoring the original
-#'   `jsonlite::toJSON` function.
-#' @export
-disable_fast_json <- function() {
-  pkg_env <- as.environment("package:jsonlite")
-  
-  if (exists("original_toJSON", envir = .fastgeojson_cache)) {
-    unlockBinding("toJSON", pkg_env)
-    assign("toJSON", get("original_toJSON", envir = .fastgeojson_cache), pkg_env)
-    lockBinding("toJSON", pkg_env)
-    message("Reverted to standard jsonlite serialization.")
-  } else {
-    warning("Original toJSON not found. Did you enable fast_json first?")
-  }
 }

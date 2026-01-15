@@ -19,9 +19,9 @@ knitr::opts_chunk$set(
 
 Implemented in Rust via the **extendr** framework, it uses parallel processing and low-level optimizations to deliver **2.4–16× speedups** over existing R solutions on large datasets.
 
-The resulting strings are ready for immediate use in web applications (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and other R packages that interface with JavaScript.
+The resulting strings are ready for use in web applications (Shiny, Plumber), direct integration with `leaflet::addGeoJSON()`, and other R packages that interface with JavaScript.
 
-> **Status: v0.2.1** — Adds global injection (enable_fast_json()) to directly integrate with Shiny, Leaflet, and Highcharter apps without code changes, and full auto_unbox support for strict jsonlite compatibility.
+> **Status: v0.2.1** — Adds the auto_unbox argument to as_json(), giving users explicit control over whether single-element vectors are serialized as JSON scalars or arrays.
 
 ## Performance Benchmarks
 
@@ -49,39 +49,11 @@ data.frame(
   knitr::kable()
 ```
 
-## Turbocharge your Shiny Apps
-
-Instantly accelerate your existing R web applications (`Shiny`, `Highcharter`, `Leaflet`) by hot-swapping the serialization engine.
-
-> **Experimental Feature:**
-> While `fastgeojson` is designed as a drop-in replacement for `jsonlite`, replacing the core serialization engine of a running application is a significant change.
->
-> We strongly recommend **testing this in a staging environment** first. If you encounter any rendering issues (e.g., empty charts or missing map layers), you can instantly revert to the standard engine using `disable_fast_json()`.
-
-By calling `enable_fast_json()`, you globally replace the standard `jsonlite::toJSON` function with the parallelized `fastgeojson::as_json` backend. This upgrades your app's performance without requiring you to refactor existing code.
-
-Simply add this to the top of your `app.R` or `global.R`:
-
-```r
-library(fastgeojson)
-
-# 🚀 Hot-swap the serialization engine
-# This redirects all jsonlite::toJSON calls to fastgeojson::as_json
-enable_fast_json()
-
-# ... your existing Shiny/Highcharter code now runs on Rust ...
-```
-
-To revert to standard behavior at any time:
-```r
-disable_fast_json()
-```
-
 ## Correctness & Compatibility
 
-The `as_json()` function is designed to replicate the behavior of `jsonlite::toJSON()`, acting as a high-fidelity drop-in replacement.
+The `as_json()` function is designed to replicate the behavior of the default settings of `jsonlite::toJSON()`.
 
-While exact parity cannot be guaranteed for every possible input permutation, `fastgeojson` has been rigorously benchmarked against `jsonlite` across a diverse set of complex scenarios. In all tested cases below, the outputs are identical.
+While exact parity cannot be guaranteed for every possible input permutation, `fastgeojson` has been benchmarked against `jsonlite` across a diverse set of complex scenarios. In all tested cases below, the outputs are identical.
 
 | Case | Output (Identical for both) | Match? |
 | :--- | :--- | :--- |
