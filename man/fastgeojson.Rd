@@ -7,11 +7,28 @@
 \alias{df_json_str}
 \title{Fast JSON and GeoJSON serialization for R}
 \usage{
-as_json(x, auto_unbox = FALSE)
+as_json(
+  x,
+  auto_unbox = FALSE,
+  dataframe = c("rows", "columns"),
+  na = NULL,
+  null = c("list", "null")
+)
 
-sf_geojson_str(x, auto_unbox = FALSE)
+sf_geojson_str(
+  x,
+  auto_unbox = FALSE,
+  na = c("null", "string"),
+  null = c("list", "null")
+)
 
-df_json_str(x, auto_unbox = FALSE)
+df_json_str(
+  x,
+  auto_unbox = FALSE,
+  dataframe = c("rows", "columns"),
+  na = c("null", "string"),
+  null = c("list", "null")
+)
 }
 \arguments{
 \item{x}{An input object (e.g., a data.frame, sf object, list, or vector) to serialize.}
@@ -19,17 +36,25 @@ df_json_str(x, auto_unbox = FALSE)
 \item{auto_unbox}{Logical. If \code{TRUE}, atomic vectors of length 1 are
 automatically unboxed into scalar JSON values (e.g., \verb{[1]} becomes \code{1}).
 If \code{FALSE} (default), they remain as single-element arrays (e.g., \verb{[1]}).}
+
+\item{dataframe}{Character. Defines the output structure for data frames:
+\code{"rows"} (default) output as an array of objects (\verb{[\{...\}]}),
+\code{"columns"} output as an object of arrays (\code{{...}}).}
+
+\item{na}{Character. Controls how \code{NA} values are serialized:
+\itemize{
+\item \strong{Default:} Uses "smart" logic (see Type Handling section).
+\item \strong{"null":} Forces all \code{NA} values to be serialized as JSON \code{null}.
+\item \strong{"string":} Forces all \code{NA} values to be serialized as \code{"NA"}.
+}}
+
+\item{null}{Character. Controls how \code{NULL} values (in lists) are serialized:
+\code{"list"} (default) maps to \verb{[]} (empty array) or \code{{}} (empty object) depending on context.
+\code{"null"} maps to JSON \code{null}.}
 }
 \value{
-\itemize{
-\item \code{as_json()}: Returns a length-one character vector containing the JSON string.
-If the input is an \code{sf} object, the result has class \code{c("geojson", "json")}.
-Otherwise, it has class \code{"json"}.
-\item \code{sf_geojson_str()}: Returns a length-one character vector with class
-\code{c("geojson", "json")} containing a 'GeoJSON' FeatureCollection string.
-\item \code{df_json_str()}: Returns a length-one character vector with class \code{"json"}
-containing a 'JSON' array string.
-}
+A length-one character vector containing the JSON string with class \code{"json"}.
+If the input is an \code{sf} object, the class is \code{c("geojson", "json")}.
 }
 \description{
 \code{fastgeojson} provides a high-performance serialization backend for converting
@@ -55,49 +80,65 @@ encoding is performed in parallel using multiple CPU cores via the Rust
 \strong{Performance Note:}
 There is \strong{no material performance penalty} for using \code{\link[=as_json]{as_json()}} compared to the
 specialized underlying functions. The internal dispatch mechanism has negligible
-overhead (nanoseconds). Users are strongly encouraged to use \code{\link[=as_json]{as_json()}} exclusively
-rather than calling \code{sf_geojson_str()} or \code{df_json_str()} directly.
+overhead. Users are strongly encouraged to use \code{\link[=as_json]{as_json()}} exclusively.
 }
 \section{Type handling}{
 
 \itemize{
-\item \strong{Numeric:} Written as JSON numbers. Infinite/NaN values are written as strings (\code{"Inf"}, \code{"NaN"}).
+\item \strong{Numeric:} Written as JSON numbers. Infinite/NaN values are determined by the \code{na} argument.
 \item \strong{Logical:} Written as JSON booleans.
 \item \strong{Character:} Written as JSON strings with UTF-8 escaping.
 \item \strong{Matrix:} Serialized row-major as an array of arrays.
 \item \strong{Factor:} Encoded using their character levels.
-\item \strong{Missing values (Data Frames):} \code{NA} fields are \strong{omitted} from
-the JSON object to reduce payload size.
-\item \strong{Missing values (Vectors):} \code{NA} values are converted to
-\code{"NA"} strings. This ensures arrays remain fixed-length and avoids mixing
-types (e.g., numbers mixed with nulls) in strict environments.
+}
+}
+
+\section{Missing Value (NA) Handling}{
+
+\code{fastgeojson} employs "Smart" defaults to match standard R JSON conventions
+(specifically \code{jsonlite}), while offering strict overrides via the \code{na} argument:
+
+\itemize{
+\item \strong{Default (Smart):}
+\itemize{
+\item In \strong{Column Mode} (\code{dataframe="columns"}), numeric \code{NA}s are converted
+to \code{"NA"} strings to maintain array type homogeneity. Non-numeric \code{NA}s become \code{null}.
+\item In \strong{Row Mode} (\code{dataframe="rows"}), \code{NA} values are usually \strong{omitted}
+from the object to reduce payload size.
+}
+\item \strong{Explicit (\code{na="null"}):} Forces all \code{NA} values (numeric or otherwise)
+to be serialized as JSON \code{null}.
+\item \strong{Explicit (\code{na="string"}):} Forces all \code{NA} values to be serialized as \code{"NA"}.
 }
 }
 
 \examples{
-# 1. Generic Objects (Vectors, Lists, Matrices)
+# 1. Generic Objects
 as_json(list(a = 1, b = "foo", c = NA))
 
-# Auto-unbox example
+# 2. Auto-unbox
 as_json(list(val = 5), auto_unbox = TRUE)  # {"val":5}
 as_json(list(val = 5), auto_unbox = FALSE) # {"val":[5]}
 
-# 2. Spatial Data (sf) - Automatically detects and outputs GeoJSON
+# 3. Data Frames (Row vs Column orientation)
+df <- data.frame(x = 1:2, y = c("a", NA))
+as_json(df, dataframe = "rows")    # [{"x":1,"y":"a"},{"x":2}]  (NA omitted)
+as_json(df, dataframe = "columns") # {"x":[1,2],"y":["a",null]}
+
+# 4. Controlling NA serialization
+# Force NA to null in all contexts
+as_json(c(1, NA, 3), na = "null") # [1, null, 3]
+# Force NA to string
+as_json(c(1, NA, 3), na = "string") # [1, "NA", 3]
+
+# 5. Spatial Data (sf)
 if (requireNamespace("sf", quietly = TRUE)) {
      nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
-     geo_str <- as_json(nc)
+     # automatically detects sf and outputs GeoJSON FeatureCollection
+     geo_str <- as_json(nc[1:3, ])
 }
-
-# 3. Tabular Data (data.frame)
-df <- data.frame(x = runif(5), y = letters[1:5])
-json_str <- as_json(df)
 
 }
 \seealso{
 \code{\link[=as_json]{as_json()}} - The primary function for all serialization tasks.
-
-\strong{Deprecated:} The functions \code{\link[=sf_geojson_str]{sf_geojson_str()}} and \code{\link[=df_json_str]{df_json_str()}} are
-maintained for backward compatibility but may be removed in future updates.
-Users should migrate to \code{\link[=as_json]{as_json()}}, which offers identical performance
-with a unified API.
 }

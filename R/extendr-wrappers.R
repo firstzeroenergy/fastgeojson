@@ -10,11 +10,11 @@
 #' @useDynLib fastgeojson, .registration = TRUE
 NULL
 
-sf_geojson_str_impl <- function(x, auto_unbox) .Call(wrap__sf_geojson_str_impl, x, auto_unbox)
+sf_geojson_str_impl <- function(x, auto_unbox, na, null) .Call(wrap__sf_geojson_str_impl, x, auto_unbox, na, null)
 
-df_json_str_impl <- function(x, auto_unbox) .Call(wrap__df_json_str_impl, x, auto_unbox)
+df_json_str_impl <- function(x, auto_unbox, dataframe, na, null) .Call(wrap__df_json_str_impl, x, auto_unbox, dataframe, na, null)
 
-obj_json_str_impl <- function(x, auto_unbox) .Call(wrap__obj_json_str_impl, x, auto_unbox)
+obj_json_str_impl <- function(x, auto_unbox, na, null) .Call(wrap__obj_json_str_impl, x, auto_unbox, na, null)
 
 
 # nolint end

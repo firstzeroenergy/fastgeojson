@@ -1,3 +1,11 @@
+# fastgeojson 0.2.2
+
+* **Dataframe Orientation:** Added the `dataframe` argument to toggle between row-oriented output (default, `[{...}]`) and column-oriented output (`{...}`).
+* **Context-Aware NA Handling:** Implemented "Smart" default logic for missing values to match standard R conventions:
+    * **Default:** In column mode, numeric `NA`s are coerced to `"NA"` strings to maintain array type homogeneity, while other types default to `null`. In row mode, `NA` values are omitted to reduce payload size.
+    * **Explicit:** Specifying `na = "null"` or `na = "string"` strictly enforces the requested format regardless of the data type or structure.
+* **Null Value Control:** Added the `null` argument to control the serialization of `NULL` (empty) values in lists, supporting coercion to empty containers (`"list"`, default) or explicit JSON `null`.
+
 # fastgeojson 0.2.1
 
 * **Scalar Serialization Support:** Extended the `as_json()` interface to include the `auto_unbox` argument, enabling the serialization of length-one atomic vectors as native JSON scalars. This provides deterministic control over data typing, allowing specific distinction between singleton arrays and primitive scalar values in the output payload.

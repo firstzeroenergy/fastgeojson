@@ -15,9 +15,8 @@ The resulting strings are ready for use in web applications (Shiny,
 Plumber), direct integration with `leaflet::addGeoJSON()`, and other R
 packages that interface with JavaScript.
 
-> **Status: v0.2.1** — Adds the auto_unbox argument to as_json(), giving
-> users explicit control over whether single-element vectors are
-> serialized as JSON scalars or arrays.
+> **Status: v0.2.2** — Adds dataframe = (“rows”, columns”), na =
+> (“null,”string”, and null = (“null”, “list”) arguments to as_json().
 
 ## Performance Benchmarks
 
@@ -68,6 +67,11 @@ the outputs are identical.
 | **List Column**    | `[{"id":1,"nested":[{"a":1,"b":"x"}]}...]`      | ✅     |
 | **List Atomic**    | `[{"id":1,"vals":[1,2,3]}...]`                  | ✅     |
 | **Row Names**      | `[{"x":1,"y":"a","_row":"r1"}...]`              | ✅     |
+
+Progress continues on replicating the full behavior or
+jsonlite::toJSON(), with the following input arguments currently
+available: -auto_box = (TRUE, FALSE) -dataframe = (“rows”, “columns”)
+-na = (“null”, “string”) -null = (“null”, “list”)
 
 ## Installation
 
@@ -244,7 +248,7 @@ observe({
 
 ## Supported Features
 
-`fastgeojson` v0.2.1 supports serialization for a wide range of R data
+`fastgeojson` v0.2.2 supports serialization for a wide range of R data
 types:
 
 - **Geometries:** Native support for all `sf` geometry types (POINT,

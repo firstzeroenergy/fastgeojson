@@ -616,9 +616,9 @@ datasets.</p>
 Plumber), direct integration with <code>leaflet::addGeoJSON()</code>,
 and other R packages that interface with JavaScript.</p>
 <blockquote>
-<p><strong>Status: v0.2.1</strong> — Adds the auto_unbox argument to
-as_json(), giving users explicit control over whether single-element
-vectors are serialized as JSON scalars or arrays.</p>
+<p><strong>Status: v0.2.2</strong> — Adds dataframe = (“rows”,
+columns”), na = (“null,”string”, and null = (“null”, “list”) arguments
+to as_json().</p>
 </blockquote>
 <h2 id="performance-benchmarks">Performance Benchmarks</h2>
 <p>Benchmarks conducted with <code>microbenchmark</code> (times in
@@ -777,6 +777,10 @@ tested cases below, the outputs are identical.</p>
 </tr>
 </tbody>
 </table>
+<p>Progress continues on replicating the full behavior or
+jsonlite::toJSON(), with the following input arguments currently
+available: -auto_box = (TRUE, FALSE) -dataframe = (“rows”, “columns”)
+-na = (“null”, “string”) -null = (“null”, “list”)</p>
 <h2 id="installation">Installation</h2>
 <h3 id="from-cran-recommended">From CRAN (Recommended)</h3>
 <p>Once available on CRAN, you can install the stable version
@@ -925,7 +929,7 @@ when sending data to the browser.</p>
 <span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  session<span class="sc">$</span><span class="fu">sendCustomMessage</span>(<span class="st">&quot;updateMap&quot;</span>, json_data)</span>
 <span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>})</span></code></pre></div>
 <h2 id="supported-features">Supported Features</h2>
-<p><code>fastgeojson</code> v0.2.1 supports serialization for a wide
+<p><code>fastgeojson</code> v0.2.2 supports serialization for a wide
 range of R data types:</p>
 <ul>
 <li><strong>Geometries:</strong> Native support for all <code>sf</code>
