@@ -1,3 +1,7 @@
+# fastgeojson 0.1.3
+
+* Fixed a parallel build race during Rust compilation on some CRAN check platforms by ensuring Rust build artifact cleanup runs only after package linking completes.
+
 # fastgeojson 0.1.2
 
 * Fixed `_abort` symbol warnings on macOS and Linux by implementing proper Rust build artifact cleanup.

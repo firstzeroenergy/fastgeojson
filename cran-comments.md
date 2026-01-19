@@ -1,38 +1,21 @@
-\## Resubmission
+## Resubmission
 
-This is a resubmission. In this version, I have addressed the following feedback:
+This is a resubmission. I have addressed the CRAN check failures as follows:
 
+* Fixed a parallel build race in `src/Makevars` where Rust build artifacts (`rust/target`, `.cargo`, `rust/vendor`) could be removed while `cargo build` was still running under parallel `make`. Cleanup now runs only after `$(SHLIB)` finishes linking.
+* Cargo is invoked with `-j 2` and uses `--offline` when `rust/vendor.tar.xz` is present, consistent with CRAN policy (no network access during installation).
 
+## Test environments
 
-\* Removed redundant "for R" from the Title in DESCRIPTION.
+* local Windows 11 install, R 4.5.2
+* win-builder (devel and release)
+* GitHub Actions (macos-latest, ubuntu-latest, windows-latest)
+* R-hub: atlas (Fedora, R-devel) and macos-arm64
 
-\* Added single quotes around software names (e.g., 'JSON', 'Rust', 'sf') in both DESCRIPTION and documentation.
+## R CMD check results
 
-\* Added \\value{} sections to the .Rd documentation for exported functions to describe return values and classes.
+0 errors | 0 warnings | 0 notes
 
-
-
-\## Test environments
-
-\* local Windows 11 install, R 4.5.2
-
-\* R-universe (Ubuntu 22.04, Windows Server 2022, macOS Sequoia)
-
-\* win-builder (devel and release)
-
-\* R-hub (macOS-arm64, Ubuntu-latest)
-
-\* GitHub Actions (macos-latest, ubuntu-latest, windows-latest)
-
-
-
-\## R CMD check results
-
-0 errors | 0 warnings | 0 note
-
-
-
-\## Downstream dependencies
+## Downstream dependencies
 
 There are currently no downstream dependencies for this package.
-
