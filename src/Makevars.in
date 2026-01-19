@@ -1,18 +1,23 @@
-## ---- fastgeojson: src/Makevars.in (portable) ----
-## DO NOT use GNU make extensions here.
+# src/Makevars.in
 
 TARGET_DIR = rust/target
 LIBDIR     = $(TARGET_DIR)/release
 STATLIB    = $(LIBDIR)/libfastgeojson.a
 
-## PKG_LIBS gets the platform-specific extra flags via configure substitution
 PKG_LIBS   = -L$(LIBDIR) -lfastgeojson @DARWIN_LDFLAGS@
 
-# --- CHANGE 1: Add clean_rust to the 'all' target ---
-.PHONY: clean_rust
-all: $(SHLIB) clean_rust
+# CRAN Policy: Use local directory for Cargo
+CARGO_HOME = $(CURDIR)/rust/.cargo
 
-## Ensure Rust static library exists before linking
+.PHONY: all cleanup
+
+all: cleanup
+
+# Cleanup runs ONLY after linking is done (safe under make -j)
+cleanup: $(SHLIB)
+	rm -rf $(TARGET_DIR) rust/.cargo rust/vendor
+
+# Ensure Rust static library exists before linking
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
@@ -21,32 +26,28 @@ $(STATLIB):
 	cargo --version
 
 	@echo "== fastgeojson: setup vendored deps =="
-	mkdir -p rust/.cargo
+	mkdir -p "$(CARGO_HOME)"
 	if [ -f rust/vendor.tar.xz ]; then \
 		tar xf rust/vendor.tar.xz -C rust && \
-		echo '[source.crates-io]' > rust/.cargo/config.toml && \
-		echo 'replace-with = "vendored-sources"' >> rust/.cargo/config.toml && \
-		echo '[source.vendored-sources]' >> rust/.cargo/config.toml && \
-		echo 'directory = "vendor"' >> rust/.cargo/config.toml; \
+		echo '[source.crates-io]' > "$(CARGO_HOME)/config.toml" && \
+		echo 'replace-with = "vendored-sources"' >> "$(CARGO_HOME)/config.toml" && \
+		echo '[source.vendored-sources]' >> "$(CARGO_HOME)/config.toml" && \
+		echo 'directory = "vendor"' >> "$(CARGO_HOME)/config.toml"; \
 	fi
 
 	@echo "== fastgeojson: build Rust =="
-	CARGO_HOME="`pwd`/rust/.cargo"; export CARGO_HOME; \
+	export CARGO_HOME="$(CARGO_HOME)"; \
 	if [ -f rust/vendor.tar.xz ]; then \
 		echo "Building OFFLINE."; \
-		cargo build --release --lib --offline \
+		cargo build -j 2 --release --lib --offline \
 			--manifest-path=rust/Cargo.toml \
 			--target-dir $(TARGET_DIR); \
 	else \
 		echo "Building ONLINE."; \
-		cargo build --release --lib \
+		cargo build -j 2 --release --lib \
 			--manifest-path=rust/Cargo.toml \
 			--target-dir $(TARGET_DIR); \
 	fi
-
-# --- CHANGE 2: Add the cleanup step ---
-clean_rust:
-	rm -rf $(TARGET_DIR) rust/.cargo rust/vendor
 
 clean:
 	rm -f $(SHLIB) $(OBJECTS)

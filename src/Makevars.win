@@ -2,59 +2,60 @@
 
 TARGET = $(subst 64,x86_64,$(subst 32,i686,$(WIN)))-pc-windows-gnu
 
-TARGET_DIR = ./rust/target
+# IMPORTANT: keep these RELATIVE to avoid spaces/parentheses in -L flags
+TARGET_DIR = rust/target
 LIBDIR = $(TARGET_DIR)/$(TARGET)/release
 STATLIB = $(LIBDIR)/libfastgeojson.a
 
 PKG_LIBS = -L$(LIBDIR) -lfastgeojson \
            -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
 
-# --- CHANGE 1: Add clean_rust to the 'all' target ---
-.PHONY: clean_rust
-all: $(SHLIB) clean_rust
+# Local Cargo home (relative)
+CARGO_HOME = rust/.cargo
 
+.PHONY: all cleanup
+
+all: cleanup
+
+# Cleanup runs ONLY after linking is done (safe under make -j)
+cleanup: $(SHLIB)
+	rm -rf "$(TARGET_DIR)" "rust/.cargo" "rust/vendor"
+
+# Ensure Rust static library exists before linking
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
-	# 1. Print Debug Info
 	rustc --version
 	cargo --version
 
-	# 2. Prepare Windows Linker Mock
-	mkdir -p $(TARGET_DIR)/libgcc_mock
-	touch $(TARGET_DIR)/libgcc_mock/libgcc_eh.a
+	mkdir -p "$(TARGET_DIR)/libgcc_mock"
+	touch "$(TARGET_DIR)/libgcc_mock/libgcc_eh.a"
 
-	# 3. Setup Vendor (OFFLINE MODE)
-	mkdir -p rust/.cargo
+	mkdir -p "$(CARGO_HOME)"
+	# FIX: Combined onto one line for safety
 	if [ -f "rust/vendor.tar.xz" ]; then \
 		tar xf "rust/vendor.tar.xz" -C "rust" && \
-		echo '[source.crates-io]' > rust/.cargo/config.toml && \
-		echo 'replace-with = "vendored-sources"' >> rust/.cargo/config.toml && \
-		echo '[source.vendored-sources]' >> rust/.cargo/config.toml && \
-		echo 'directory = "vendor"' >> rust/.cargo/config.toml; \
+		echo '[source.crates-io]' > "$(CARGO_HOME)/config.toml" && \
+		echo 'replace-with = "vendored-sources"' >> "$(CARGO_HOME)/config.toml" && \
+		echo '[source.vendored-sources]' >> "$(CARGO_HOME)/config.toml" && \
+		echo 'directory = "vendor"' >> "$(CARGO_HOME)/config.toml"; \
 	fi
 
-	# 4. Build
-	export LIBRARY_PATH="$(LIBRARY_PATH);$(CURDIR)/$(TARGET_DIR)/libgcc_mock" && \
+	# Use ':' for sh environments; keep everything relative
+	export LIBRARY_PATH="$(LIBRARY_PATH):$(TARGET_DIR)/libgcc_mock" && \
 	export RUSTFLAGS="$(RUSTFLAGS) --print=native-static-libs" && \
-	export CARGO_HOME="$(CURDIR)/rust/.cargo" && \
+	export CARGO_HOME="$(CARGO_HOME)" && \
 	if [ -f "rust/vendor.tar.xz" ]; then \
 		echo "Building OFFLINE (Windows)..." && \
-		cargo build --target=$(TARGET) --lib --release --offline \
-		  --manifest-path=rust/Cargo.toml \
-		  --target-dir=$(TARGET_DIR); \
+		cargo build -j 2 --target=$(TARGET) --lib --release --offline \
+		  --manifest-path="rust/Cargo.toml" \
+		  --target-dir="$(TARGET_DIR)"; \
 	else \
 		echo "Building ONLINE (Windows)..." && \
-		cargo build --target=$(TARGET) --lib --release \
-		  --manifest-path=rust/Cargo.toml \
-		  --target-dir=$(TARGET_DIR); \
+		cargo build -j 2 --target=$(TARGET) --lib --release \
+		  --manifest-path="rust/Cargo.toml" \
+		  --target-dir="$(TARGET_DIR)"; \
 	fi
 
-# --- CHANGE 2: Add the cleanup step ---
-# This runs AFTER $(SHLIB) is created. It deletes the static lib
-# so CRAN doesn't see the _abort symbol inside it.
-clean_rust:
-	rm -rf $(TARGET_DIR) rust/.cargo rust/vendor
-
 clean:
-	rm -rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) rust/.cargo rust/vendor
+	rm -rf "$(SHLIB)" "$(STATLIB)" "$(OBJECTS)" "$(TARGET_DIR)" "rust/.cargo" "rust/vendor"
