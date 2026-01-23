@@ -1,5 +1,8 @@
 # src/Makevars.in
 
+RUSTC = @RUSTC@
+CARGO = @CARGO@
+
 TARGET_DIR = rust/target
 LIBDIR     = $(TARGET_DIR)/release
 STATLIB    = $(LIBDIR)/libfastgeojson.a
@@ -22,8 +25,8 @@ $(SHLIB): $(STATLIB)
 
 $(STATLIB):
 	@echo "== fastgeojson: Rust toolchain =="
-	rustc --version
-	cargo --version
+	$(RUSTC) --version
+	$(CARGO) --version
 
 	@echo "== fastgeojson: setup vendored deps =="
 	mkdir -p "$(CARGO_HOME)"
@@ -37,16 +40,17 @@ $(STATLIB):
 
 	@echo "== fastgeojson: build Rust =="
 	export CARGO_HOME="$(CARGO_HOME)"; \
+	export RUSTC="$(RUSTC)"; \
 	if [ -f rust/vendor.tar.xz ]; then \
-		echo "Building OFFLINE."; \
-		cargo build -j 2 --release --lib --offline \
-			--manifest-path=rust/Cargo.toml \
-			--target-dir $(TARGET_DIR); \
+	    echo "Building OFFLINE."; \
+	    $(CARGO) build -j 2 --release --lib --offline \
+	        --manifest-path=rust/Cargo.toml \
+	        --target-dir $(TARGET_DIR); \
 	else \
-		echo "Building ONLINE."; \
-		cargo build -j 2 --release --lib \
-			--manifest-path=rust/Cargo.toml \
-			--target-dir $(TARGET_DIR); \
+	    echo "Building ONLINE."; \
+	    $(CARGO) build -j 2 --release --lib \
+	        --manifest-path=rust/Cargo.toml \
+	        --target-dir $(TARGET_DIR); \
 	fi
 
 clean:

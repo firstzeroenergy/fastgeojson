@@ -4,8 +4,11 @@
 # Make rustup installs discoverable if present
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# 1) Check for rustc (compiler)
-if ! command -v rustc >/dev/null 2>&1; then
+# 1) Locate rustc and cargo (absolute paths)
+RUSTC=$(command -v rustc)
+CARGO=$(command -v cargo)
+
+if [ -z "$RUSTC" ]; then
   echo "-------------------------------------------------------------------"
   echo "ERROR: Rust compiler (rustc) not found."
   echo "Please install Rust (rustc + cargo): https://rustup.rs/"
@@ -13,8 +16,7 @@ if ! command -v rustc >/dev/null 2>&1; then
   exit 1
 fi
 
-# 2) Check for cargo (package manager)
-if ! command -v cargo >/dev/null 2>&1; then
+if [ -z "$CARGO" ]; then
   echo "-------------------------------------------------------------------"
   echo "ERROR: Cargo package manager not found."
   echo "Please install Rust (rustc + cargo): https://rustup.rs/"
@@ -22,19 +24,24 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
-# 3) Print versions for the install log (CRAN request)
+# 2) Print versions for the install log (CRAN request)
 echo "Using Rust toolchain:"
-rustc --version
-cargo --version
+"$RUSTC" --version
+"$CARGO" --version
 
-# 4) Platform checks
-UNAME_S=`uname -s`
+# 3) Platform-specific linker flags
+UNAME_S=$(uname -s)
 DARWIN_LDFLAGS=""
 
 if [ "$UNAME_S" = "Darwin" ]; then
   DARWIN_LDFLAGS="-Wl,-dead_strip -Wl,-x"
 fi
 
-sed "s|@DARWIN_LDFLAGS@|$DARWIN_LDFLAGS|g" src/Makevars.in > src/Makevars
+# 4) Generate Makevars with injected values
+sed \
+  -e "s|@DARWIN_LDFLAGS@|$DARWIN_LDFLAGS|g" \
+  -e "s|@RUSTC@|$RUSTC|g" \
+  -e "s|@CARGO@|$CARGO|g" \
+  src/Makevars.in > src/Makevars
 
 exit 0
