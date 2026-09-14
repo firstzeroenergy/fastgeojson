@@ -11,8 +11,9 @@ validating against jsonlite's own test suite.
   positionally beyond `x` must be updated -- `as_json(df, "columns")` now means
   `dataframe = "columns"`, where previously position 2 was `auto_unbox`.
 * Several defaults changed to match `toJSON()`:
-  * `digits` is now `4` (was full `ryu` precision). Pass `digits = NA` for the
-    shortest round-trippable representation.
+  * `digits` is now `4` (was full `ryu` precision). `digits = NA` matches
+    `toJSON()`, which is 15 significant digits; pass `digits = Inf` for the
+    shortest representation that round-trips exactly.
   * `keep_vec_names` is now `FALSE` (was `TRUE`), so named atomic vectors
     become arrays rather than objects. Setting it to `TRUE` emits the same
     deprecation message jsonlite does.
@@ -51,6 +52,30 @@ validating against jsonlite's own test suite.
 * `difftime` and `integer64` are converted rather than reinterpreted;
   `integer64` values were previously emitted as garbage doubles.
 
+### Further parity fixes
+
+* A logical matrix column emitted `null` for every cell, and so did a
+  character matrix column: only integer and double were handled and everything
+  else fell through to a null.
+* A `NaN` inside a numeric matrix printed as `"NA"` rather than `"NaN"`.
+* An array column with more than two dimensions emitted one number per row
+  instead of the row's slice, because the detection required exactly two
+  dimensions. It now nests over dimensions 2..N with the last innermost.
+* A matrix column in a data frame ignored `digits` entirely, formatting
+  straight through `ryu`.
+* Converting a complex matrix column dropped its `dim`, so the result was
+  rejected with "replacement has 6 rows, data has 2". `toJSON()` handles that
+  input.
+* `read_coord_ptr` called `REAL()` with no type check. `REAL()` raises an R
+  error on anything else, which longjmps over Rust frames: a malformed
+  geometry leaked about 1.8 KB per call and never reached a destructor. It is
+  now guarded, and a coordinate object that is not a plain double vector goes
+  through the recursive writer, which is what `toJSON()` does with it -- nine
+  such shapes went from an error to matching byte for byte.
+* A zero-length coordinate vector emitted a null geometry rather than
+  `{"type":"Point","coordinates":[]}`. A real `POINT EMPTY` from `st_point()`
+  is two NAs and never took that branch.
+
 ## Memory safety
 
 * **Fixed a segfault.** An `sf` object whose row names claimed more rows than
@@ -80,6 +105,20 @@ validating against jsonlite's own test suite.
   the first call, even for a three-row data frame.
 * `pretty` is supported, reproducing jsonlite's layout (scalar-only arrays stay
   on one line; objects expand).
+* `digits = Inf` writes the shortest decimal that reads back as the same
+  double. It is the only lossless setting: `digits = NA` keeps 15 significant
+  digits, so `pi` becomes `3.14159265358979`, and about 94% of doubles arising
+  from real arithmetic need 16 or 17. `digits = 22` is exact but always writes
+  17 digits, which is 2 to 63% more output than necessary depending on the
+  data. `toJSON()` warns and falls back to `digits = NA` for a non-integer
+  `digits`, so nothing that works against jsonlite changes meaning.
+* `as_bytes = TRUE` returns a raw vector instead of a character vector.
+  R creates a character vector at about 1 GB/s, because it hashes every byte
+  to intern the string in its global CHARSXP cache; for a 49 MB result that is
+  52 ms, which profiling put at three quarters of the total time for a
+  million-row frame. A caller writing the JSON to a socket or a file never
+  needed it interned. Incompatible with `pretty`, which needs a string.
+* `FASTGEOJSON_PROFILE=1` makes each call print its phase timings to stderr.
 
 ## Build
 
@@ -104,6 +143,211 @@ validating against jsonlite's own test suite.
 * Added `cleanup` / `cleanup.win`, and made the post-link cleanup depend on
   `$(SHLIB)` so it cannot race under `make -j`.
 * Vendored crates build offline with `--locked` and `-j 2`.
+
+## Performance
+
+Serialization was profiled and reworked against a 21-shape benchmark corpus
+(`tools/bench/`), measured at one thread and at full width, with every timed
+call checked against a reference digest so a change that altered the output
+is reported as a failure rather than a speedup.
+
+Single-threaded throughput, which is the algorithmic number:
+
+| shape | before | after | |
+|---|---|---|---|
+| nested list | 6.1 MB/s | 171.6 | **28x** |
+| data frame with a list column | 20.9 | 251.3 | **12x** |
+| plain double vector | 31.2 | 239.5 | 7.7x |
+| `sf` polygons | 38.3 | 273.0 | 7.1x |
+| `sf` linestrings | 40.7 | 275.4 | 6.8x |
+| wide frame (200 columns) | 56.8 | 296.0 | 5.2x |
+| tall narrow frame | 56.1 | 282.9 | 5.0x |
+| numeric frame | 61.4 | 288.0 | 4.7x |
+
+At full width, the wide frame reaches 759 MB/s (13x its old figure) and
+polygon layers 721 MB/s (19x), both of which previously ran on a single core.
+
+### Date and POSIXct
+
+Both were formatted by R, at 4.7 and 5.3 microseconds per value against about
+25 nanoseconds for every other type, which made a timestamp column two orders
+of magnitude slower than the rest of the frame and no faster than jsonlite.
+
+A `Date` needs no time zone, so nothing about it requires R: day numbers are
+converted with `civil_from_days` and written directly. A `POSIXct` needs R
+only for the UTC offset, which `as.POSIXlt()` supplies for 0.07 microseconds
+per value; R now hands the writer local civil seconds and the rest is
+arithmetic.
+
+| 200k values, one column | before | after | vs jsonlite |
+|---|---|---|---|
+| `Date` | 952 ms | 4.97 ms | 1.0x to 200.6x |
+| `POSIXct` | 1066 ms | 29.9 ms | 1.1x to 38.1x |
+
+Both are verified against R across their whole admissible range:
+`tools/bench/verify_date_parity.R` checks 325k values, including every day
+from 1870 to 2070, the century and 400-year leap rules and the exact point at
+which R's own `format()` gives up; `verify_time_parity.R` covers 13 time
+zones, every hour of a year across four of them so both DST transitions are
+straddled to the second, and instants 95 years either side of the epoch.
+
+### Number formatting
+
+`write_fixed_decimals`, the hottest function in the package, extracted decimal
+digits one per division. It now takes two at a time from a 200-byte pair
+table: 25% faster on integral values, 12.5% on large magnitudes, 9.6% on
+coordinates.
+
+`write_g_format`, which `digits = NA` and any value below 1e-5 or above 2^31
+reach, called `format!()` to get scientific notation and again for fixed
+notation -- two heap allocations and two runs of `core::fmt`'s float
+conversion per value. The scientific form now goes into a stack buffer and the
+fixed form is derived from that mantissa by moving the decimal point, which is
+the same rounding. 393 to 136 ns per value.
+
+### Strings
+
+A character column's parallel prepass established only whether the workers
+could read R's bytes directly, then each worker called `Rf_xlength` -- a
+cross-DLL call per cell -- and scanned the bytes again for escapes. The
+prepass now records length, NA and needs-escaping in four bytes per cell, so
+the common case is a quote, one memcpy and a quote: 24% faster on short
+strings, 20% on 40-character strings, 10% on URLs.
+
+It also no longer abandons a column it cannot fully read. Cells needing
+translation are translated on the R thread and only those cells, so one latin1
+value among 200,000 ASCII ones costs what a clean column costs rather than
+45% more.
+
+### Assembly
+
+Phase timing on a million-row frame at 32 workers showed the serializer taking
+4 ms and scaling 16.6x from a single worker, while handing the result back to R
+took 52 ms and assembling the chunks 11 ms. The scaling curve had plateaued at
+2.7x, which fits Amdahl with a serial fraction of 0.37 -- it was never the
+parallel region.
+
+The chunk offsets are known once the workers finish, so the output is now
+sized exactly and written once, straight into its destination; with
+`as_bytes = TRUE` that destination is R's own vector. Chunk buffers are also
+sized from the data rather than a flat 128 bytes per row or 2048 per feature,
+which was 21x too large for a point feature and too small for a 200-vertex
+polygon.
+
+| 1M rows x 4 cols | 71.8 ms | `as_bytes` 17.0 ms | 4.2x |
+|---|---|---|---|
+| 200k rows x 50 cols | 210.6 | 47.9 | 4.4x |
+| 1M point features | 176.2 | 67.7 | 2.6x |
+
+### Geometry
+
+Describing an sfc for the workers was the last serial phase of any size on the
+`sf` path, and it did not scale: 30.15 ms on one worker and 32.98 ms on 32,
+while serialization scaled 11.9x over the same range.
+
+`Rf_getAttrib` walks the attribute pairlist and marks what it returns
+NOT_MUTABLE, which is a write to a shared header; a direct pairlist walk is
+three pointer reads per link and touches nothing. `VECTOR_ELT` per element
+became one `VECTOR_PTR_RO` per list. A POINT never carries a `dim`, so for a
+homogeneous point column the attribute lookup goes entirely. With those in
+place the pass is pure reads and now runs in the pool, with anything it cannot
+describe -- GEOMETRYCOLLECTION, an unrecognised class, coordinates that are not
+plain doubles -- deferred to a second pass on the R thread.
+
+| extract geometry | before | after |
+|---|---|---|
+| 1M points | 32.98 ms | 3.21 ms |
+| 10k polygons | 3.08 ms | 0.55 ms |
+
+Chunk boundaries also followed row counts, which assumes every feature costs
+the same. Real layers hold Russia next to Monaco. Boundaries now follow
+cumulative ordinates, so a large geometry gets a chunk of its own:
+
+| 32 workers | before | after |
+|---|---|---|
+| uniform 10k x 200 vertices | 15.9x | 15.7x |
+| 9990 small + 10 x 200k | 1.6x | 6.0x |
+| 9900 small + 100 x 20k | 2.3x | 10.4x |
+
+A single geometry is never split across workers, so a layer that is one huge
+polygon still scales 1.0x.
+
+### Matrix columns
+
+A matrix column was rendered into an arena on the R thread, one cell at a
+time, before the parallel phase began: about 30 ns per cell against 4 for a
+plain column, scaling 1.2x where a plain frame scaled 6 to 12x. A numeric
+matrix is now described for the workers, which read R's column-major storage
+directly.
+
+| 200k rows | before | after |
+|---|---|---|
+| 3-wide matrix | 18.5 ms | 3.1 ms |
+| 10-wide | 60.5 ms | 7.8 ms |
+| 50-wide | 288.5 ms | 26.7 ms |
+
+Per cell and in thread scaling, a matrix column now behaves like a plain one.
+Against `jsonlite` on the 10-wide case: 442.6 to 23.5 ms.
+
+### Assembly
+
+The chunk copies now run in parallel. Their destination ranges are a prefix
+sum over the chunk lengths, so they are disjoint by construction.
+
+| as_bytes | before | after |
+|---|---|---|
+| 1M rows x 4 cols | 13.98 ms | 11.90 ms |
+| 1M point features | 43.71 ms | 31.65 ms |
+| 200k rows x 50 cols | 35.57 ms | 29.54 ms |
+
+### Measurement
+
+`tools/bench/harness.R` reports the minimum of repeated timing blocks rather
+than the median, because background load only ever makes a measurement slower.
+Medians on the development machine drift by up to 18% run to run, which was
+enough to make a change that does nothing look like a 24% regression.
+`tools/bench/ab.sh` runs a benchmark against the committed sources and then the
+working copy, so both halves are measured the same way.
+
+Two candidate optimisations were implemented, measured and reverted because
+they did nothing: specialised XY/XYZ/XYZM coordinate writers, since the loop
+body is an entire float formatter at ~40 ns and the bookkeeping removed is
+~1 ns; and unrolling the same loop over an array of cursors, which measured
+slower than the code it replaced.
+
+Against the fastest alternative for each shape (jsonlite, yyjsonr, jsonify,
+geojsonsf), on **wall-clock time for the same input**: faster on all 21
+shapes single-threaded, by 1.1x to 7.1x, and on all 21 at full width, by 1.1x
+to 7.1x. Measured on throughput *per byte* instead, it wins 17 of 21
+single-threaded and 20 of 21 at full width; the exceptions are all shapes
+where the alternative emits close to twice the bytes for the same input,
+because `as_json()` honours jsonlite's `digits = 4` while yyjsonr writes
+shortest-round-trip. Both metrics are reported by `tools/bench/compare.R`.
+
+The changes, in descending order of what they were worth:
+
+* The class pre-encoding scan moved from interpreted R into Rust. It had been
+  92% of the cost of serialising a list of 20000 small lists (68.5ms of
+  74.3ms, against 4.2ms in the serializer itself).
+* `R_IsNA`/`R_IsNaN` were cross-DLL calls per element in the hottest loops.
+  `NA_real_` is a NaN whose low-order word is 1954, so a bit test replaces
+  them.
+* Chunk sizing now uses estimated work -- columns, string lengths, sampled
+  geometry cost -- rather than row count. A 2000x200 frame and a
+  1000-feature polygon layer had each been landing in a single chunk.
+* Character columns whose bytes are already valid UTF-8 are escaped straight
+  out of R's CHARSXP by the workers, removing an entire copy of every string
+  and moving the escaping into the parallel region.
+* The fixed-decimal formatter is a port of the `modp_dtoa2` that jsonlite
+  itself uses, replacing `core::fmt`. Faster, and byte-identical to jsonlite
+  by construction rather than by coincidence.
+* extendr `Robj` construction removed from the recursive paths: it takes a
+  global mutex twice per node, and had been running once per *cell* in one
+  function.
+
+`fastgeojson_threads(1)` also now genuinely runs on one worker. It previously
+fell through to rayon's global pool, so it had never been a usable
+single-threaded baseline.
 
 ## Full jsonlite argument coverage
 

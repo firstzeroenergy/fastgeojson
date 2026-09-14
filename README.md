@@ -1,94 +1,90 @@
+<!-- Generated from README.Rmd by tools/build_readme.R. Do not edit by hand. -->
 
 # fastgeojson <img src="man/figures/logo.png" align="right" height="138" />
 
 **High-performance GeoJSON and JSON serialization for R**
 
-`fastgeojson` provides fast conversion of `sf` objects to GeoJSON
-FeatureCollections and generic R objects (`data.frame`, lists, vectors)
-to JSON strings.
+`fastgeojson` converts `sf` objects to GeoJSON FeatureCollections and generic R objects (`data.frame`, lists, vectors) to JSON strings.
 
-Implemented in Rust via the **extendr** framework, it uses parallel
-processing and low-level optimizations to deliver **2.4–16× speedups**
-over existing R solutions on large datasets.
+Implemented in Rust via **extendr**, it delivers **12–19× speedups** over existing R solutions on large datasets, with output byte-for-byte identical to `jsonlite::toJSON()`.
 
-The resulting strings are ready for use in web applications (Shiny,
-Plumber), direct integration with `leaflet::addGeoJSON()`, and other R
-packages that interface with JavaScript.
+Results are ready for Shiny, Plumber, `leaflet::addGeoJSON()`, and any package that talks to JavaScript.
 
-> **Status: v0.2.2** — Adds dataframe = (“rows”, columns”), na =
-> (“null,”string”, and null = (“null”, “list”) arguments to as_json().
+> **Status: v0.3.0** — `as_json()` takes `jsonlite::toJSON()`'s arguments, in the same order, with the same defaults. See [Upgrading](#upgrading-from-02x).
 
-## Performance Benchmarks
+## Performance
 
-Benchmarks conducted with `microbenchmark` (times in milliseconds; lower
-is better).
+Fastest of 7 runs, **default arguments for every package**. Reproduce with `Rscript tools/bench/readme_bench.R`.
 
-### JSON serialization: 1 million rows × 4 mixed columns
+### 1 million rows × 4 mixed columns
 
-| Package     | Median_ms | Speedup.vs.jsonlite |
-|:------------|----------:|:--------------------|
-| jsonify     |      1573 | —                   |
-| jsonlite    |      1281 | —                   |
-| yyjsonr     |       235 | 5.5×                |
-| fastgeojson |        98 | 13.1×               |
+|Package                | Time_ms| Output_MB|Speedup vs jsonlite |
+|:----------------------|-------:|---------:|:-------------------|
+|jsonify                |    1345|      61.1|0.9×                |
+|jsonlite               |    1145|      49.4|—                   |
+|yyjsonr                |     233|      61.1|4.9×                |
+|fastgeojson (1 thread) |     180|      49.4|6.4×                |
+|fastgeojson            |      61|      49.4|18.8×               |
 
-### GeoJSON serialization: 1 million point features
+### 1 million point features
 
-| Package     | Median_ms | Speedup.vs.geojsonsf |
-|:------------|----------:|:---------------------|
-| geojsonsf   |      1920 | —                    |
-| yyjsonr     |       586 | 3.3×                 |
-| fastgeojson |       238 | 8.1×                 |
+|Package                | Time_ms| Output_MB|Speedup vs geojsonsf |
+|:----------------------|-------:|---------:|:--------------------|
+|geojsonsf              |    1948|     150.8|—                    |
+|yyjsonr                |     586|     150.8|3.3×                 |
+|fastgeojson (1 thread) |     395|     119.8|4.9×                 |
+|fastgeojson            |     162|     119.8|12.0×                |
 
-## Correctness & Compatibility
+### 10,000 polygons × 200 vertices
 
-The `as_json()` function is designed to replicate the behavior of the
-default settings of `jsonlite::toJSON()`.
+|Package     | Time_ms| Output_MB|Speedup vs geojsonsf |
+|:-----------|-------:|---------:|:--------------------|
+|geojsonsf   |     607|      76.4|—                    |
+|yyjsonr     |     248|      76.4|2.4×                 |
+|fastgeojson |      47|      37.6|12.9×                |
 
-While exact parity cannot be guaranteed for every possible input
-permutation, `fastgeojson` has been benchmarked against `jsonlite`
-across a diverse set of complex scenarios. In all tested cases below,
-the outputs are identical.
+Output size is shown because packages that write shortest-round-trip numbers emit larger payloads for the same input; `fastgeojson` matches `jsonlite` exactly.
 
-| Case               | Output (Identical for both)                     | Match? |
-|:-------------------|:------------------------------------------------|:-------|
-| **Simple Numeric** | `[{"x":1},{"x":2.5},{"x":-3}]`                  | ✅     |
-| **Integer NA**     | `[{"x":1},{},{"x":3}]`                          | ✅     |
-| **Double Special** | `[{"x":1},{},{},{},{}]`                         | ✅     |
-| **Logical NA**     | `[{"x":true},{"x":false},{}]`                   | ✅     |
-| **Character NA**   | `[{"ch":"foo"},{},{"ch":"NA"},{"ch":""}]`       | ✅     |
-| **Factor NA**      | `[{"x":"a"},{"x":"b"},{},{"x":"NA"},{"x":"a"}]` | ✅     |
-| **Mixed Types**    | `[{"i":1...},{"ch":""},{"i":3...}]`             | ✅     |
-| **Dates**          | `[{"d":"2020-01-01"},{},{"d":"2020-01-03"}]`    | ✅     |
-| **POSIXct**        | `[{"dt":"2020-01-01 00:00:00"}...]`             | ✅     |
-| **Empty Rows**     | `[]`                                            | ✅     |
-| **Empty Cols**     | `[{},{},{}]`                                    | ✅     |
-| **Special Chars**  | `[{"sp ace":1,"quote\"here":"a"}...]`           | ✅     |
-| **List Column**    | `[{"id":1,"nested":[{"a":1,"b":"x"}]}...]`      | ✅     |
-| **List Atomic**    | `[{"id":1,"vals":[1,2,3]}...]`                  | ✅     |
-| **Row Names**      | `[{"x":1,"y":"a","_row":"r1"}...]`              | ✅     |
+`as_bytes = TRUE` is 4.2× to 6.5× faster again on these shapes, because most of what remains is R interning the result into a character vector.
 
-Progress continues on replicating the full behavior or
-jsonlite::toJSON(), with the following input arguments currently
-available: -auto_box = (TRUE, FALSE) -dataframe = (“rows”, “columns”)
--na = (“null”, “string”) -null = (“null”, “list”)
+## Correctness
+
+jsonlite's own `toJSON` test suite runs against `as_json()` — the test files from jsonlite 2.0.0 live in `tests/testthat/` with `toJSON()` bound to `as_json()`. **907 expectations pass, no failures, no skips**, including jsonlite's `sf` tests, which validate against GDAL's GeoJSON writer.
+
+One deliberate difference: `jsonlite` 2.0.0 defaults `sf` objects to a record array. `as_json()` defaults to a `FeatureCollection`.
+
+```r
+as_json(nc)                      # FeatureCollection  (default here)
+as_json(nc, sf = "features")     # array of Feature objects
+as_json(nc, sf = "dataframe")    # record array       (jsonlite default)
+
+options(fastgeojson.sf = "dataframe")   # or switch the default globally
+```
+
+## Upgrading from 0.2.x
+
+Arguments are positional in jsonlite's order, so `as_json(df, "columns")` now means `dataframe = "columns"`. Named arguments are unaffected.
+
+Four defaults now match `toJSON()`, so output can differ from 0.2.x:
+
+| Argument | 0.2.x | 0.3.0 |
+| :--- | :--- | :--- |
+| `digits` | `NULL` | `4` — pass `digits = NA` for full precision |
+| `keep_vec_names` | `TRUE` | `FALSE` — named vectors become arrays |
+| `json_verbatim` | `TRUE` | `FALSE` |
+| `UTC` | `TRUE` | `FALSE` — timestamps keep their own time zone |
+
+`Date` and `POSIXt` follow `jsonlite`: `POSIXt = "string"` uses `format()`, `"ISO8601"` emits `"2013-06-17T22:33:44"`, and `Date = "epoch"` returns days. Full list in `NEWS.md`.
 
 ## Installation
 
-### From CRAN (Recommended)
-
-Once available on CRAN, you can install the stable version directly:
-
-``` r
-install.packages("fastgeojson")
+```r
+install.packages("fastgeojson")           # CRAN, once available
 ```
 
-### Development Version (R-universe)
+Development version and pre-compiled Windows/macOS binaries (no Rust required):
 
-To install the latest development version or pre-compiled binaries for
-Windows/macOS (no Rust required) before the CRAN release:
-
-``` r
+```r
 options(repos = c(
   firstzero = "https://firstzeroenergy.r-universe.dev",
   CRAN = "https://cloud.r-project.org"
@@ -96,185 +92,130 @@ options(repos = c(
 install.packages("fastgeojson")
 ```
 
-## Deploying to shinyapps.io
+**Deploying to shinyapps.io:** the CRAN version works automatically. For the R-universe version, add those same `options(repos = ...)` lines to the top of `app.R` or `global.R` so the build server can find the package.
 
-**Note:** If you are using the CRAN version, deployment works
-automatically.
+## API
 
-If you are using the **development version** from R-universe, you must
-tell shinyapps.io where to find the package. **The Fix:** Add the
-following lines to the very top of your `app.R` (or `global.R`) file.
-
-``` r
-options(repos = c(
-  firstzero = "https://firstzeroenergy.r-universe.dev",
-  CRAN = "https://cloud.r-project.org"
-))
+```r
+as_json(
+  x,
+  dataframe = c("rows", "columns", "values"),
+  matrix    = c("rowmajor", "columnmajor"),
+  Date      = c("ISO8601", "epoch"),
+  POSIXt    = c("string", "ISO8601", "epoch", "mongo"),
+  factor    = c("string", "integer"),
+  complex   = c("string", "list"),
+  raw       = c("base64", "hex", "mongo", "int", "js"),
+  null      = c("list", "null"),
+  na        = c("null", "string"),
+  auto_unbox = FALSE,
+  digits     = 4,
+  pretty     = FALSE,
+  force      = FALSE,
+  ...
+)
 ```
 
-This ensures the build server can find and install `fastgeojson` from
-the custom repository.
+`as_json()` detects the input type and dispatches to the appropriate encoder. Returns a length-one character vector of class `"json"`, or `c("geojson", "json")` for `sf` input.
 
-## Main Features of the Rust Implementation
+Two options go beyond `toJSON()`:
 
-The core performance advantages come from a carefully designed Rust
-backend:
+```r
+as_json(x, digits = Inf)      # shortest decimal that round-trips exactly
+as_json(x, as_bytes = TRUE)   # a raw vector instead of a character vector
+```
 
-- **Parallel chunked processing**: Data is split into chunks (~2048
-  rows) and processed in parallel across all CPU cores using `rayon`.
-- **Zero-overhead number formatting**: Floating-point numbers are
-  written directly to the output buffer using `ryu::raw`—eliminating the
-  temporary stack copies found in standard libraries—while integers are
-  handled via `itoa` for maximum serialization throughput.
-- **Thread-safe column preparation**: Attributes are pre-processed into
-  thread-safe structures (String Arenas, cached factors) to allow
-  concurrent access without R API calls.
-- **Direct access to R vector data**: Uses raw pointers to R’s internal
-  vectors (INTEGER, REAL, etc.) to avoid copying.
-- **Efficient Geometry Flattening**: Complex, deeply nested `sf` objects
-  are reorganized into simple, flat arrays before processing. This
-  bypasses the heavy overhead of navigating R list structures, allowing
-  specialized writers to serialize millions of coordinates in a single,
-  high-speed pass.
+`digits = Inf` is the only lossless setting; `digits = NA` matches `toJSON()`, which keeps 15 significant digits, so `pi` becomes `3.14159265358979`.
 
-These low-level optimizations eliminate the bottlenecks found in
-general-purpose JSON libraries while preserving full compatibility with
-R’s data model.
+`as_bytes = TRUE` skips R's string interning, which hashes every byte of the result and costs more than the serialization itself. Use it when the JSON is headed for a socket or a file rather than for R code.
 
-## Core API
+`fastgeojson_threads(n)` sets the worker count: `1` disables parallelism, `0` restores automatic. The default is the whole machine, honouring `FASTGEOJSON_NUM_THREADS`, `RAYON_NUM_THREADS`, `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. Output is identical at any thread count.
 
-The package provides a single, unified entry point for all
-serialization:
+`sf_geojson_str()` and `df_json_str()` remain available for direct dispatch.
 
-- **`as_json(x, auto_unbox = FALSE)`**: The “omnivore” function. It
-  automatically detects the input type (`sf` object, data frame, list,
-  or vector) and dispatches it to the optimized Rust encoders.
-  - *Arguments:* `auto_unbox`: If `TRUE`, atomic vectors of length 1 are
-    automatically unboxed into scalar values (e.g., `[1]` becomes `1`).
-  - *Returns:* A character string with class `json` (and `geojson` if
-    applicable).
-  - *Behavior:* Designed as a drop-in replacement for
-    `jsonlite::toJSON()`, but significantly faster.
+## Usage
 
-> **Note:** The low-level functions `sf_geojson_str()` and
-> `df_json_str()` are still available for direct dispatch, but
-> `as_json()` is recommended for all standard workflows.
-
-## Usage Examples
-
-### 1. Spatial Data (`sf` objects)
-
-`fastgeojson` automatically detects `sf` objects and outputs standard
-GeoJSON FeatureCollections.
-
-``` r
+```r
 library(sf)
 library(fastgeojson)
 
 nc <- st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
 
-# Automatically encoded as GeoJSON
 json_out <- as_json(nc)
-
 class(json_out)
 #> [1] "geojson" "json"
 
-# Ready for Leaflet (no additional conversion needed)
 library(leaflet)
-leaflet() %>%
-  addTiles() %>%
-  addGeoJSON(json_out)
+leaflet() |> addTiles() |> addGeoJSON(json_out)
 ```
 
-### 2. Tabular Data (Data Frames)
+```r
+df <- data.frame(id = 1:2, name = c("Alice", "Bob"), score = c(98.5, NA))
 
-Data frames are serialized as a JSON array of objects (row-oriented),
-optimized for web APIs.
-
-``` r
-df <- data.frame(
-  id = 1:2,
-  name = c("Alice", "Bob"),
-  score = c(98.5, NA)
-)
-
-json_out <- as_json(df)
-
-class(json_out)
-#> [1] "json"
-
-json_out
+as_json(df)
 #> [{"id":1,"name":"Alice","score":98.5},{"id":2,"name":"Bob"}]
+
+as_json(df, dataframe = "columns")
+#> {"id":[1,2],"name":["Alice","Bob"],"score":[98.5,"NA"]}
 ```
 
-### 3. General R Objects & Auto-Unboxing
+Row-oriented output omits missing fields; column-oriented output keeps array lengths aligned. Both match `jsonlite`.
 
-Designed to behave similar to `jsonlite` for standard R structures,
-preserving types and hierarchies.
-
-``` r
-# Default behavior (auto_unbox = FALSE)
-as_json(list(val = 5), auto_unbox = FALSE)
+```r
+as_json(list(val = 5))
 #> {"val":[5]}
 
-# With unboxing (auto_unbox = TRUE)
 as_json(list(val = 5), auto_unbox = TRUE)
 #> {"val":5}
 
-# Nested lists
-data <- list(
-  meta = list(version = "1.0"),
-  payload = c(10, 20)
-)
-as_json(data, auto_unbox = TRUE)
+as_json(list(meta = list(version = "1.0"), payload = c(10, 20)), auto_unbox = TRUE)
 #> {"meta":{"version":"1.0"},"payload":[10,20]}
+
+as_json(list(a = 1:2, b = list(c = "x")), pretty = TRUE)
+#> {
+#>   "a": [1, 2],
+#>   "b": {
+#>     "c": ["x"]
+#>   }
+#> }
 ```
 
-## Integration with Shiny
+Because `as_json()` returns pre-classed `json` strings, Shiny can hand them to the browser without re-encoding:
 
-Because `fastgeojson` returns pre-classed `json` strings, you can bypass
-R’s internal serialization when sending data to the browser.
-
-``` r
-# FAST: Direct handoff to Leaflet or deck.gl
+```r
 observe({
-  # Use the generic encoder
-  json_data <- as_json(large_sf_object)
-  
-  # Sent directly to client without re-encoding
-  session$sendCustomMessage("updateMap", json_data)
+  session$sendCustomMessage("updateMap", as_json(large_sf_object))
 })
 ```
 
-## Supported Features
+## Supported types
 
-`fastgeojson` v0.2.2 supports serialization for a wide range of R data
-types:
+- **Geometries:** POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON, GEOMETRYCOLLECTION, in XY, XYZ, XYM and XYZM. Any `sfc` is encoded as geometry wherever it appears.
+- **Vectors:** integer, double, logical, character, factor, complex, raw.
+- **Structures:** list columns, nested lists, matrices, arrays, nested data frames, tibbles.
+- **Time:** `Date`, `POSIXt`, `difftime`, `integer64`.
+- **Encodings:** output is always valid UTF-8; latin1 and native inputs are translated, and escaping matches `jsonlite` byte for byte.
 
-- **Geometries:** Native support for all `sf` geometry types (POINT,
-  MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON) and
-  GeometryCollections.
-- **Atomic Vectors:** Integer, Double, Logical, Character, Factor.
-- **Complex Structures:** List-Columns, Nested Lists, Matrices, and Data
-  Frames (recursive serialization).
-- **Dates / POSIXt:** Automatically formatted as character strings
-  (e.g., `"2024-01-01"`) to ensure preservation of time zones and
-  formats.
-- **Missing values:** Handled contextually to preserve structure.
-  - **Data Frames:** Fields with `NA` are **omitted** (creating sparse
-    objects) to reduce payload size.
-  - **Vectors/Lists:** `NA` values are converted to `"NA"` strings
-    (e.g., `[1, "NA", 3]`) to preserve strict array length.
+The full `jsonlite::toJSON()` argument surface is supported.
+
+## Implementation
+
+- **Work-aware parallel chunking** — chunk size comes from estimated work (columns, sampled string lengths, sampled geometry cost), so wide frames and polygon layers parallelise as readily as tall numeric ones. Small inputs stay serial.
+- **Number formatting matched to `jsonlite`** — the fixed-precision path ports the same `modp_dtoa2` algorithm, so output agrees by construction; `ryu` covers `digits = NA`.
+- **Strings escaped in place** — where a column's bytes are already valid UTF-8, workers escape R's `CHARSXP` data directly, copying each string once, in parallel.
+- **Table-driven escaping** — a 256-entry table probed eight bytes at a time, so a clean string costs one scan and one bulk copy.
+- **Direct access to R vectors** — raw pointers into `INTEGER`, `REAL`, `LOGICAL`, `STRING_PTR_RO`, with lengths carried alongside.
+- **Flat geometry arenas** — nested `sf` structures are flattened into contiguous coordinate arrays, letting specialised writers emit millions of coordinates in one pass.
+- **Dates and timestamps computed, not formatted** — `Date` is calendar arithmetic and needs no time zone; `POSIXct` needs R only for its UTC offset. R's `format()` costs about 5 microseconds per value, against tens of nanoseconds here.
+- **One pass over the output** — chunk offsets are known once the workers finish, so the result is sized exactly and written once, straight into its destination.
 
 ## Development
 
-- Rust implementation: `src/rust/` (managed via `rust-toolchain.toml`
-  for reproducible builds)
-- R interface: `R/`
-- Built with **extendr**
+Rust in `src/rust/` as ten modules, R interface in `R/`, benchmarks and parity verifiers in `tools/bench/`. Built with **extendr**. `FASTGEOJSON_PROFILE=1` prints per-phase timings.
 
-Bug reports, feature requests, and contributions are very welcome
+Bug reports, feature requests, and contributions are very welcome.
 
 ## License
 
 MIT © FirstZero Energy
+

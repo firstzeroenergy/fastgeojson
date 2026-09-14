@@ -10,15 +10,17 @@
 #' @useDynLib fastgeojson, .registration = TRUE
 NULL
 
-sf_geojson_str_impl <- function(x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor) .Call(wrap__sf_geojson_str_impl, x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor)
+sf_geojson_str_impl <- function(x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor, as_bytes) .Call(wrap__sf_geojson_str_impl, x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor, as_bytes)
 
-df_json_str_impl <- function(x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor) .Call(wrap__df_json_str_impl, x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor)
+df_json_str_impl <- function(x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor, as_bytes) .Call(wrap__df_json_str_impl, x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor, as_bytes)
 
-obj_json_str_impl <- function(x, auto_unbox, na, null, factor, digits, always_decimal, matrix_colmajor) .Call(wrap__obj_json_str_impl, x, auto_unbox, na, null, factor, digits, always_decimal, matrix_colmajor)
+obj_json_str_impl <- function(x, auto_unbox, na, null, factor, digits, always_decimal, matrix_colmajor, as_bytes) .Call(wrap__obj_json_str_impl, x, auto_unbox, na, null, factor, digits, always_decimal, matrix_colmajor, as_bytes)
 
 threads_impl <- function(n) .Call(wrap__threads_impl, n)
 
 pretty_json_impl <- function(x, indent) .Call(wrap__pretty_json_impl, x, indent)
+
+needs_prep_impl <- function(x, date_prep) .Call(wrap__needs_prep_impl, x, date_prep)
 
 
 # nolint end

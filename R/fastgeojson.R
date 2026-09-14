@@ -131,6 +131,12 @@ as_json <- function(
   rownames        <- if (is.null(dots$rownames)) TRUE else isTRUE(dots$rownames)
   use_signif      <- if (is.null(dots$use_signif)) inherits(digits, "AsIs") else isTRUE(dots$use_signif)
   strict_atomic   <- isTRUE(dots$strict_atomic)
+  # as_bytes = TRUE returns a raw vector instead of a character vector.
+  # R charges about 1 GB/s to make a character vector, because it hashes every
+  # byte to intern the string in its CHARSXP cache; for a 49 MB result that is
+  # 52 ms, measured at 74% of the total. Callers that write the JSON to a
+  # socket or a file never needed it interned.
+  as_bytes        <- isTRUE(dots$as_bytes)
   # jsonlite 2.0.0 defaults sf objects to "dataframe" (a record array).
   # fastgeojson defaults to "geojson", because emitting a FeatureCollection for
   # an sf object is the point of the package and what existing callers rely on.
@@ -147,22 +153,36 @@ as_json <- function(
   }
 
   # ---- digits ----------------------------------------------------------
+  # digits = Inf asks for the shortest decimal that reads back as the same
+  # double: lossless, and smaller and faster than either alternative. It is
+  # not a jsonlite mode -- toJSON() warns and falls back to digits = NA -- and
+  # is the only exact one here, since digits = NA keeps 15 significant digits
+  # and about 94% of doubles from real arithmetic need 16 or 17.
   digits_int <- NULL
-  if (!is.null(digits) && !(length(digits) == 1L && is.na(digits))) {
+  if (length(digits) == 1L && is.numeric(digits) && !is.na(digits) &&
+      is.infinite(digits) && digits > 0) {
+    digits_int <- 255L
+  } else if (!is.null(digits) && !(length(digits) == 1L && is.na(digits))) {
     d <- suppressWarnings(as.integer(unclass(digits)))
     if (length(d) == 1L && !is.na(d)) digits_int <- d
   }
 
+  if (as_bytes && !identical(pretty, FALSE)) {
+    stop("as_bytes = TRUE and pretty are incompatible: pretty-printing needs a string.",
+         call. = FALSE)
+  }
+
   # ---- NULL input ------------------------------------------------------
   if (is.null(x)) {
-    return(.as_json_class(if (null == "list") "{}" else "null"))
+    out <- if (null == "list") "{}" else "null"
+    return(if (as_bytes) charToRaw(out) else .as_json_class(out))
   }
 
   # ---- already-encoded JSON -------------------------------------------
   if (inherits(x, "json")) {
     if (json_verbatim) {
       out <- enc2utf8(as.character(x))
-      return(.as_json_class(out))
+      return(if (as_bytes) charToRaw(out) else .as_json_class(out))
     }
     x <- as.character(unclass(x))
   }
@@ -192,12 +212,18 @@ as_json <- function(
   # ---- class-specific pre-encoding ------------------------------------
   # Runs before the named-vector handling below, because converting e.g. a
   # named POSIXlt to character is what turns it *into* a named atomic vector.
+  # Date = "ISO8601" is formatted by the Rust writer straight from the day
+  # numbers. R's format() costs ~4.7 us per value, which made Date about 200x
+  # slower than every other column type; the writer does it in ~5 ns.
+  skip_date <- identical(Date, "ISO8601")
   opts <- list(
     Date = Date, POSIXt = POSIXt, UTC = UTC, time_format = time_format,
     complex = complex, raw = raw, digits = digits_int, na = na,
-    skip_complex = complex_cols
+    skip_complex = complex_cols, skip_date = skip_date
   )
-  if (.needs_prep(x)) x <- .prep(x, opts)
+  # The scan is done in Rust: the interpreted-R version of it was 92% of the
+  # total cost for a list of many small lists.
+  if (needs_prep_impl(x, !skip_date)) x <- .prep(x, opts)
 
   # ---- named atomic vectors -------------------------------------------
   # jsonlite drops vector names by default; keep_vec_names = TRUE reinstates
@@ -220,7 +246,7 @@ as_json <- function(
   # ---- dispatch --------------------------------------------------------
   res <- if (inherits(x, "sf") && sf_mode != "dataframe") {
     .as_json_class(
-      sf_geojson_str_impl(x, auto_unbox, na, null, factor, digits_int, sf_mode, always_decimal, matrix == "columnmajor"),
+      sf_geojson_str_impl(x, auto_unbox, na, null, factor, digits_int, sf_mode, always_decimal, matrix == "columnmajor", as_bytes),
       geo = identical(sf_mode, "geojson")
     )
   } else if (complex_cols) {
@@ -231,21 +257,22 @@ as_json <- function(
       if (is.complex(col)) list(real = Re(col), imaginary = Im(col)) else col
     })
     .as_json_class(obj_json_str_impl(cols, auto_unbox, na, null, factor,
-                                     digits_int, always_decimal, FALSE))
+                                     digits_int, always_decimal, FALSE, as_bytes))
   } else if (inherits(x, "data.frame")) {
     # sf = "dataframe" is jsonlite's callNextMethod(): serialise the frame
     # normally and let the geometry column render as typed geometry objects
     # in its own position. Dropping the class is what routes it here.
     if (inherits(x, "sf")) x <- .drop_sf_class(x)
     if (nrow(x) == 0L && dataframe == "rows") {
-      .as_json_class("[]")
+      if (as_bytes) charToRaw("[]") else .as_json_class("[]")
     } else {
-      .as_json_class(df_json_str_impl(x, auto_unbox, dataframe, na, null, factor, digits_int, always_decimal, matrix == "columnmajor"))
+      .as_json_class(df_json_str_impl(x, auto_unbox, dataframe, na, null, factor, digits_int, always_decimal, matrix == "columnmajor", as_bytes))
     }
   } else {
-    .as_json_class(obj_json_str_impl(x, auto_unbox, na, null, factor, digits_int, always_decimal, matrix == "columnmajor"))
+    .as_json_class(obj_json_str_impl(x, auto_unbox, na, null, factor, digits_int, always_decimal, matrix == "columnmajor", as_bytes))
   }
 
+  if (as_bytes) return(res)
   if (!identical(pretty, FALSE)) res <- .as_json_class(.pretty(res, pretty), geo = inherits(res, "geojson"))
   res
 }
@@ -255,6 +282,9 @@ as_json <- function(
 # ------------------------------------------------------------------
 
 .as_json_class <- function(s, geo = FALSE) {
+  # as_bytes = TRUE returns a raw vector, which has no json class and must not
+  # go through as.character() -- that would render it as hex pairs.
+  if (is.raw(s)) return(s)
   structure(as.character(s), class = if (geo) c("geojson", "json") else "json")
 }
 
@@ -281,6 +311,12 @@ as_json <- function(
   )
 }
 
+# NA as opposed to NaN: both satisfy is.na(), but they format differently.
+is_true_na <- function(v) {
+  u <- unclass(v)
+  if (is.double(u)) is.na(u) & !is.nan(u) else is.na(u)
+}
+
 # Classes that need converting in R before reaching the Rust encoder.
 .PREP_CLASSES <- c("POSIXt", "Date", "difftime", "integer64", "blob")
 
@@ -304,7 +340,7 @@ as_json <- function(
 
 .prep <- function(x, opts) {
   if (inherits(x, "POSIXt")) return(.encode_posixt(x, opts))
-  if (inherits(x, "Date"))   return(.encode_date(x, opts))
+  if (inherits(x, "Date"))   return(if (isTRUE(opts$skip_date)) x else .encode_date(x, opts))
   if (inherits(x, "difftime")) return(as.numeric(x))
   if (inherits(x, "integer64")) return(as.character(x))
   # A blob is a list of raw vectors, encoded elementwise into one character
@@ -331,7 +367,15 @@ as_json <- function(
     for (i in seq_along(x)) {
       el <- x[[i]]
       if (.needs_prep_atomic(el) || (is.list(el) && !inherits(el, "sfc"))) {
-        x[[i]] <- .prep(el, opts)
+        enc <- .prep(el, opts)
+        # A matrix column keeps its dim. Without this, converting a complex
+        # matrix column produced a bare vector of nrow * ncol values, which
+        # `[[<-.data.frame` rejects: "replacement has 6 rows, data has 2".
+        d <- dim(el)
+        if (!is.null(d) && is.null(dim(enc)) && length(enc) == length(el)) {
+          dim(enc) <- d
+        }
+        x[[i]] <- enc
       }
     }
     return(x)
@@ -345,6 +389,10 @@ as_json <- function(
     return(floor(as.numeric(as.POSIXct(v)) * 1000))
   }
   if (identical(opts$POSIXt, "mongo")) return(.encode_posixt_mongo(v, opts))
+
+  fast <- .encode_posixt_local(v, opts)
+  if (!is.null(fast)) return(fast)
+
   fmt <- opts$time_format
   if (is.null(fmt)) {
     fmt <- if (identical(opts$POSIXt, "string")) {
@@ -367,7 +415,9 @@ as_json <- function(
 .encode_date <- function(v, opts) {
   if (identical(opts$Date, "epoch")) return(unclass(v))
   out <- format(v)
-  out[is.na(v)] <- NA_character_
+  # is.na() is true for NaN as well, but format() renders NaN as the literal
+  # "NaN" and jsonlite emits that string. Only a true NA becomes NA_character_.
+  out[is_true_na(v)] <- NA_character_
   out
 }
 
@@ -377,6 +427,72 @@ as_json <- function(
 # inside a data.frame each ROW carries a bare object, whereas at top level or
 # in a list the whole vector is one array. Both are produced as pre-rendered
 # `json` text, which the encoder splices verbatim.
+# Hands the writer local civil seconds instead of formatted text.
+#
+# format() on a POSIXct costs ~5.3 us per value, which made a timestamp column
+# about 200x slower than every other type. Only the UTC offset actually needs
+# R, and as.POSIXlt() supplies it for ~0.07 us per value; adding it to the
+# epoch seconds gives local civil time, which the writer turns into text with
+# plain arithmetic.
+#
+# Returns NULL for the cases that still need R: a caller-supplied
+# `time_format`, sub-second digits, a named vector (keep_vec_names would take
+# it apart), or a time zone R cannot resolve to an offset.
+.encode_posixt_local <- function(v, opts) {
+  if (!is.null(opts$time_format)) return(NULL)
+  if (!is.null(names(v))) return(NULL)
+
+  mode <- opts$POSIXt %||% "string"
+  utc <- isTRUE(opts$UTC)
+
+  # Only format = "" consults digits.secs; the ISO8601 layouts are explicit
+  # formats with no %OS in them, so they are unaffected by the option.
+  if (identical(mode, "string")) {
+    ds <- getOption("digits.secs")
+    if (!is.null(ds) && !isTRUE(ds < 1)) return(NULL)
+  }
+
+  ct <- as.POSIXct(v)
+  # format.POSIXct() reads the tzone attribute only when tz is not supplied;
+  # mirror that, because passing tz = "" explicitly would silently switch to
+  # the machine's local zone.
+  tzone <- attr(ct, "tzone")
+  tz <- if (utc) "UTC" else if (!is.null(tzone)) tzone[1L] else ""
+  off <- unclass(as.POSIXlt(ct, tz = tz))$gmtoff
+  secs <- as.numeric(ct)
+  if (is.null(off) || length(off) != length(secs)) return(NULL)
+
+  # An offset R could not resolve is only a problem where there is a real
+  # instant to place; NA and the infinities have no offset and do not need one.
+  nonfin <- !is.finite(secs)
+  anyn <- any(nonfin)
+  if (anyNA(off) && (!anyn || anyNA(off[!nonfin]))) return(NULL)
+
+  local <- floor(secs) + off
+  # floor() and the offset would turn NaN and the infinities into NA; put the
+  # originals back so the writer can emit "NaN", "Inf" and "-Inf" as jsonlite
+  # does, and null only for a true NA.
+  if (anyn) local[nonfin] <- secs[nonfin]
+
+  code <- if (identical(mode, "string")) {
+    # format.POSIXlt's format = "" rule: a date alone when every element of
+    # the vector is exactly midnight. It is a whole-vector decision, which is
+    # why it is taken here rather than per element.
+    #
+    # Testing seconds-of-day on the unfloored value is the same test as
+    # format.POSIXlt's all(c(sec, min, hour) == 0) -- a fractional second
+    # makes sec non-zero there and the remainder non-zero here -- but it reads
+    # one vector instead of building a copy of three.
+    tod <- (secs + off) %% 86400
+    if (all(tod == 0, na.rm = TRUE)) 0L else 1L
+  } else if (utc) {
+    3L
+  } else {
+    2L
+  }
+  structure(local, class = "fgjtime", fgjfmt = code)
+}
+
 .encode_posixt_mongo <- function(v, opts) {
   ms <- floor(as.numeric(as.POSIXct(v)) * 1000)
   # paste0() recycles a zero-length argument to "", so guard explicitly or a

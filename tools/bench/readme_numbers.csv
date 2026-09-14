@@ -1,0 +1,13 @@
+table,package,median_ms,output_mb,ref
+json_1m,jsonify,1345,61.1,FALSE
+json_1m,jsonlite,1145,49.4,TRUE
+json_1m,yyjsonr,233,61.1,FALSE
+json_1m,fastgeojson (1 thread),180,49.4,FALSE
+json_1m,fastgeojson,61,49.4,FALSE
+points_1m,geojsonsf,1948,150.8,TRUE
+points_1m,yyjsonr,586,150.8,FALSE
+points_1m,fastgeojson (1 thread),395,119.8,FALSE
+points_1m,fastgeojson,162,119.8,FALSE
+polygons_10k,geojsonsf,607,76.4,TRUE
+polygons_10k,yyjsonr,248,76.4,FALSE
+polygons_10k,fastgeojson,47,37.6,FALSE

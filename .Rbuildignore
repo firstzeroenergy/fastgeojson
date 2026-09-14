@@ -32,3 +32,4 @@
 ^src/rust/\.cargo$
 ^src/rust/vendor-config\.toml$
 ^tools/bench$
+^tools/build_readme\.R$
