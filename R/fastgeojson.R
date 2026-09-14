@@ -766,7 +766,8 @@ is_true_na <- function(v) {
 #'   the automatic behaviour described above. `n = NULL` (default) changes
 #'   nothing and reports the current value.
 #'
-#' @return The number of threads that will be used; invisibly when setting.
+#' @return An integer scalar, the number of worker threads in use after the
+#'   call. Returned invisibly when `n` is supplied; visibly when it is not.
 #'
 #' @examples
 #' fastgeojson_threads()

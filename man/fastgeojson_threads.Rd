@@ -13,7 +13,8 @@ the automatic behaviour described above. \code{n = NULL} (default) changes
 nothing and reports the current value.}
 }
 \value{
-The number of threads that will be used; invisibly when setting.
+An integer scalar, the number of worker threads in use after the
+call. Returned invisibly when \code{n} is supplied; visibly when it is not.
 }
 \description{
 Controls how many threads the Rust backend uses for parallel serialization.
