@@ -247,7 +247,8 @@ as_json <- function(
   opts <- list(
     Date = Date, POSIXt = POSIXt, UTC = UTC, time_format = time_format,
     complex = complex, raw = raw, digits = digits_int, na = na,
-    skip_complex = complex_cols, skip_date = skip_date
+    skip_complex = complex_cols, skip_date = skip_date,
+    auto_unbox = auto_unbox, dataframe = dataframe
   )
   # The scan is done in Rust: the interpreted-R version of it was 92% of the
   # total cost for a list of many small lists.
@@ -377,7 +378,7 @@ is_true_na <- function(v) {
   if (inherits(x, "POSIXt")) return(.encode_posixt(x, opts))
   if (inherits(x, "Date"))   return(if (isTRUE(opts$skip_date)) x else .encode_date(x, opts))
   if (inherits(x, "difftime")) return(as.numeric(x))
-  if (inherits(x, "integer64")) return(as.character(x))
+  if (inherits(x, "integer64")) return(.encode_integer64(x, opts))
   # A blob is a list of raw vectors, encoded elementwise into one character
   # vector rather than a list of length-one vectors.
   if (inherits(x, "blob")) return(vapply(x, .base64, character(1), USE.NAMES = FALSE))
@@ -385,6 +386,12 @@ is_true_na <- function(v) {
   if (is.raw(x))             return(.encode_raw(x, opts))
   if (is.list(x)) {
     if (inherits(x, "sfc")) return(x)
+    # `in_df` is set for the columns of a frame and must not leak into the
+    # elements of a list column, which are whole vectors rendered as arrays.
+    # It did: an integer64 list column came out as bare cells, `"l":3` where
+    # toJSON() gives `"l":[3]`, and its NA as null where the array rule gives
+    # "NA".
+    opts$in_df <- FALSE
     if (inherits(x, "data.frame")) {
       # jsonlite's data.frame method defaults to complex = "string" because a
       # {real, imaginary} object cannot occupy a single column; an explicit
@@ -473,6 +480,16 @@ is_true_na <- function(v) {
 # Returns NULL for the cases that still need R: a caller-supplied
 # `time_format`, sub-second digits, a named vector (keep_vec_names would take
 # it apart), or a time zone R cannot resolve to an offset.
+# Time zones whose UTC offset is zero at every instant and that never observe
+# daylight saving. Verified against as.POSIXlt()$gmtoff over instants spanning
+# eighty years plus NA and the infinities: every one is 0. Not on the list:
+# anything with a numeric offset ("Etc/GMT+5"), and "" (the machine's zone).
+.zero_offset_zones <- c(
+  "UTC", "GMT", "Etc/UTC", "Etc/GMT", "Etc/Zulu", "Zulu", "UCT", "Universal",
+  "Greenwich", "GMT0", "GMT+0", "GMT-0", "Etc/UCT", "Etc/Universal",
+  "Etc/Greenwich", "Etc/GMT0", "Etc/GMT+0", "Etc/GMT-0"
+)
+
 .encode_posixt_local <- function(v, opts) {
   if (!is.null(opts$time_format)) return(NULL)
   if (!is.null(names(v))) return(NULL)
@@ -493,8 +510,18 @@ is_true_na <- function(v) {
   # the machine's local zone.
   tzone <- attr(ct, "tzone")
   tz <- if (utc) "UTC" else if (!is.null(tzone)) tzone[1L] else ""
-  off <- unclass(as.POSIXlt(ct, tz = tz))$gmtoff
   secs <- as.numeric(ct)
+  # A zone whose offset is identically zero -- UTC and its aliases -- needs
+  # no as.POSIXlt(): gmtoff is 0 for every instant there, NA and the
+  # infinities included. That call cost about 70 ms per million values, all
+  # of it to compute a vector of zeros, and it was 5-9x the Rust work for the
+  # same column. tz == "" is the machine's zone and could be anything, so it
+  # keeps the full path.
+  off <- if (nzchar(tz) && tz %in% .zero_offset_zones) {
+    rep.int(0L, length(secs))
+  } else {
+    unclass(as.POSIXlt(ct, tz = tz))$gmtoff
+  }
   if (is.null(off) || length(off) != length(secs)) return(NULL)
 
   # An offset R could not resolve is only a problem where there is a real
@@ -547,6 +574,40 @@ is_true_na <- function(v) {
     return(structure(txt, class = "fgjson"))
   }
   txt[miss] <- if (identical(opts$na, "string")) '"NA"' else "null"
+  structure(paste0("[", paste(txt, collapse = ","), "]"), class = "fgjson")
+}
+
+# bit64::integer64, as jsonlite emits it: the exact decimal digits, unquoted.
+#
+# jsonlite converts through its own C routine rather than as.numeric(), so a
+# value past 2^53 keeps every digit; bit64's as.character() is exact too. The
+# digits are pre-rendered and spliced verbatim, because a double cannot carry
+# them. This used to hand the writer a plain character vector, which came out
+# quoted -- ["1","1099511627776"] where toJSON() gives [1,1099511627776].
+#
+# NA follows the numeric rule, not the string one: "NA" by default at top
+# level (null only for na = "null"), and in a frame the key is dropped under
+# the default, as for any numeric column.
+.encode_integer64 <- function(v, opts) {
+  if (!length(v)) {
+    return(structure(if (isTRUE(opts$in_df)) character(0) else "[]", class = "fgjson"))
+  }
+  miss <- is.na(v)
+  txt <- as.character(v)
+  if (isTRUE(opts$in_df)) {
+    # The numeric column rule under the default: the key is dropped in row
+    # mode (NA_character_ is what makes the writer do that), and the cell is
+    # the string "NA" in column and values mode, exactly as a double column.
+    txt[miss] <- switch(opts$na %||% "smart",
+                        string = '"NA"',
+                        null   = "null",
+                        if (identical(opts$dataframe, "rows")) NA_character_ else '"NA"')
+    return(structure(txt, class = "fgjson"))
+  }
+  txt[miss] <- if (identical(opts$na, "null")) "null" else '"NA"'
+  if (isTRUE(opts$auto_unbox) && length(txt) == 1L) {
+    return(structure(txt, class = "fgjson"))
+  }
   structure(paste0("[", paste(txt, collapse = ","), "]"), class = "fgjson")
 }
 

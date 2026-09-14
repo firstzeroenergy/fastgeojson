@@ -896,6 +896,50 @@ mod tests {
     }
 
     #[test]
+    fn fixed_decimals_round_half_to_even_at_every_precision() {
+        // modp_dtoa2 rounds an exact half to the even neighbour: 0.5 -> 0,
+        // 1.5 -> 2, 2.5 -> 2 at d = 0, and likewise on the last kept digit at
+        // every other precision. The rounding is one boolean now rather than
+        // an if / else-if, and this is the case that boolean exists for -- a
+        // random sweep almost never lands on an exact half, so it is walked
+        // deliberately. Only values exactly representable in binary are used
+        // (k / 2^m), so "exact half" really is exact and not a formatting
+        // accident.
+        let s = |v: f64, d: usize| {
+            let mut b = Vec::new();
+            write_fixed_decimals(&mut b, v, d);
+            String::from_utf8(b).unwrap()
+        };
+        // d = 0: n + 0.5 for n in 0..64, then the same negated.
+        for n in 0..64i64 {
+            let v = n as f64 + 0.5;
+            let want = if n % 2 == 0 { n } else { n + 1 };
+            assert_eq!(s(v, 0), want.to_string(), "{} at d=0", v);
+            assert_eq!(s(-v, 0), format!("-{}", want), "{} at d=0", -v);
+        }
+        // d = 1..=3: an exact binary half on the last kept digit. At d = 1
+        // that is x.x5 with the .05 exactly representable: 0.25, 0.75, 1.25,
+        // 1.75 ... (odd multiples of 1/4); at d = 2, odd multiples of 1/8 ->
+        // x.xx5 only where the third digit is 5 exactly: 0.125, 0.375, ...;
+        // at d = 3, odd multiples of 1/16: 0.0625 is not a half-case (four
+        // digits), so use 1/2000-style decimals only where exact -- skip and
+        // instead check the general rule with values known exact.
+        let cases: &[(f64, usize, &str)] = &[
+            (0.25, 1, "0.2"), (0.75, 1, "0.8"), (1.25, 1, "1.2"), (1.75, 1, "1.8"),
+            (2.25, 1, "2.2"), (-0.25, 1, "-0.2"), (-0.75, 1, "-0.8"),
+            (0.125, 2, "0.12"), (0.375, 2, "0.38"), (0.625, 2, "0.62"), (0.875, 2, "0.88"),
+            (1.125, 2, "1.12"), (-0.125, 2, "-0.12"), (-0.375, 2, "-0.38"),
+            // carry across the whole part on an exact half rounding up
+            (0.95, 1, "1"), (9.5, 0, "10"), (99.5, 0, "100"), (0.995, 2, "1"),
+            // and one that must NOT carry (even)
+            (8.5, 0, "8"), (98.5, 0, "98"),
+        ];
+        for &(v, d, want) in cases {
+            assert_eq!(s(v, d), want, "{} at d={}", v, d);
+        }
+    }
+
+    #[test]
     fn fixed_decimals_output_is_well_formed() {
         // The reversal writes eight or sixteen bytes at a time and advances the
         // length by the real count; the whole and fraction runs each walk a

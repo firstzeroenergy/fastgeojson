@@ -25,6 +25,17 @@ pub(crate) static REQUESTED_THREADS: std::sync::atomic::AtomicUsize =
 pub(crate) static POOL: std::sync::Mutex<Option<(usize, std::sync::Arc<rayon::ThreadPool>)>> =
     std::sync::Mutex::new(None);
 
+/// Background drop tasks that have not finished yet.
+///
+/// A finished call hands its scratch -- the chunk buffers and the geometry and
+/// column descriptors -- to a pool worker to free, so the R thread returns the
+/// result without waiting on a few megabytes of sub-megabyte heap frees. This
+/// counts the ones in flight so `fastgeojson_release_pool` can wait for them
+/// before it joins the workers; freeing after the pool is gone would touch a
+/// dropped allocator.
+pub(crate) static PENDING_DROPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Are we running under `R CMD check`?
 ///
 /// `R CMD check` exports a family of `_R_CHECK_*` variables; their presence is
@@ -306,6 +317,17 @@ pub extern "C" fn fastgeojson_quiet_panics() {
 /// which is a crash waiting for the next `library(fastgeojson)`.
 #[no_mangle]
 pub extern "C" fn fastgeojson_release_pool() {
+    // Let any background drops finish first: they run on the workers this is
+    // about to join, and freeing after the pool is gone would touch a dropped
+    // allocator. They are microseconds of memory frees, so a short spin is
+    // enough; the bound stops a wedged worker hanging package unload forever.
+    use std::sync::atomic::Ordering;
+    for _ in 0..10_000 {
+        if PENDING_DROPS.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
     let taken = {
         let mut guard = POOL.lock().unwrap_or_else(|e| e.into_inner());
         guard.take()
@@ -321,6 +343,45 @@ pub extern "C" fn fastgeojson_release_pool() {
 /// Single-threaded requests skip rayon entirely, which is also what makes
 /// `fastgeojson_threads(1)` a usable baseline when separating algorithmic
 /// gains from parallel ones.
+/// Frees `t` on a pool worker instead of on the calling (R) thread.
+///
+/// A serialization holds its per-chunk output buffers and its geometry and
+/// column descriptors until the result is built, then drops them -- several
+/// megabytes across ~128 sub-megabyte heap blocks, which on Windows serialise
+/// on the allocator lock and measured 3-4 ms on the million-point path, all of
+/// it after the last work was done and none of it visible to the caller until
+/// the call returned.
+///
+/// Handing that to a worker returns the result immediately. `t` must own
+/// everything it frees and borrow nothing (`'static`), and be `Send`; the
+/// descriptors already are. The `PENDING_DROPS` counter lets pool teardown
+/// wait, so a drop can never outlive the allocator.
+///
+/// Falls back to an inline drop when there is no pool or it is one worker
+/// wide -- the single-threaded path has nowhere to hand off to, and a
+/// one-worker pool is the `fastgeojson_threads(1)` baseline where the point is
+/// to measure this thread's work.
+pub(crate) fn spawn_drop<T: Send + 'static>(t: T) {
+    use std::sync::atomic::Ordering;
+    let pool = {
+        let guard = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some((n, p)) if *n > 1 => Some(std::sync::Arc::clone(p)),
+            _ => None,
+        }
+    };
+    match pool {
+        Some(p) => {
+            PENDING_DROPS.fetch_add(1, Ordering::SeqCst);
+            p.spawn(move || {
+                drop(t);
+                PENDING_DROPS.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+        None => drop(t),
+    }
+}
+
 pub(crate) fn with_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     let want = desired_threads();
     // Do NOT short-circuit a single-thread request to a bare f(): the closure

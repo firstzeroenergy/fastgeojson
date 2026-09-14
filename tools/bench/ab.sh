@@ -8,9 +8,13 @@
 # harness in the same session shape, which is the only way differences below
 # about 10% mean anything on a desktop.
 #
-# Operates on the whole source directory. An earlier version saved only
-# lib.rs, which silently compared HEAD against HEAD once the crate was split
-# into modules and reported a real gain as no change.
+# Operates on the whole Rust source directory -- and ONLY that. R/ is not
+# swapped, so both halves run the working copy's R code; an A/B of a change
+# to R/fastgeojson.R through this script compares the change against itself.
+# For an R-side change, `git stash` / install / measure / `git stash pop` /
+# install / measure instead. An earlier version saved only lib.rs, which
+# silently compared HEAD against HEAD once the crate was split into modules
+# and reported a real gain as no change.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BENCH="${1:?usage: ab.sh <bench-script.R>}"

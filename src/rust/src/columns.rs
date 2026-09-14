@@ -1120,11 +1120,12 @@ pub(crate) fn col_is_missing(col: &ThreadSafeColumn, row: usize) -> bool {
         ColumnType::DateInt => unsafe {
             is_na_int(*(col.data_ptr as *const i32).add(row))
         },
-        // A timestamp is a string by the time jsonlite emits it, so only a
-        // true NA is missing: NaN and the infinities format to ordinary text.
+        // A timestamp is a string by the time jsonlite emits it, so NaN and
+        // the infinities format to ordinary text and are not missing. A true
+        // NA is, and so is an instant format() cannot render, which R hands
+        // back as NA; see time_cell_is_missing.
         ColumnType::TimeLocal => unsafe {
-            let v = *(col.data_ptr as *const f64).add(row);
-            v.is_nan() && is_na_real(v)
+            time_cell_is_missing(*(col.data_ptr as *const f64).add(row))
         },
         // A matrix cell is an array, which jsonlite always emits, so the key
         // is never dropped in row mode.

@@ -65,14 +65,19 @@ pub(crate) fn date_cell(v: f64) -> DateCell {
     if v == f64::NEG_INFINITY {
         return DateCell::NegInf;
     }
-    // `format()` truncates towards -Inf, so -0.5 is 1969-12-31, not 1970-01-01.
-    let d = v.floor();
-    // Keeps `d as i64` and the `+ 719468` below far away from overflow. R's
+    // Keeps the cast and the `+ 719468` below far away from overflow. R's
     // real cutoff is |d| < 8e11, checked again on the year.
-    if !(-1.0e15..=1.0e15).contains(&d) {
+    if !(-1.0e15..=1.0e15).contains(&v) {
         return DateCell::Na;
     }
-    let (y, m, dd) = civil_from_days(d as i64);
+    // `format()` truncates towards -Inf, so -0.5 is 1969-12-31, not
+    // 1970-01-01. `f64::floor` is a CRT call on the SSE2 baseline (roundsd
+    // needs SSE4.1), and it was the single largest item in a Date cell. Inside
+    // +-1e15 < 2^52 the integer cast truncates toward zero exactly, and a
+    // negative value with a fractional part needs one more step down.
+    let t = v as i64;
+    let d = t - ((t as f64 > v) as i64);
+    let (y, m, dd) = civil_from_days(d);
     if y > DATE_YEAR_MAX || y < DATE_YEAR_MIN {
         DateCell::Na
     } else {
@@ -108,9 +113,38 @@ pub(crate) fn write_date_cell(buf: &mut Vec<u8>, cell: DateCell, na: NaMode) {
         DateCell::Inf => buf.extend_from_slice(b"\"Inf\""),
         DateCell::NegInf => buf.extend_from_slice(b"\"-Inf\""),
         DateCell::Ymd(y, m, d) => {
-            buf.push(b'"');
-            write_year_month_day(buf, y, m, d);
-            buf.push(b'"');
+            if (0..=9999).contains(&y) {
+                // The overwhelmingly common case, as one store: the twelve
+                // bytes of "YYYY-MM-DD" with its quotes are built in a stack
+                // array from the digit-pair table and copied with a single
+                // 16-byte write into reserved space. It was twelve pushes,
+                // each with its own capacity check.
+                let y = y as usize;
+                let (m, d) = (m as usize, d as usize);
+                let mut t = [b'"'; 16];
+                t[1] = DIGIT_PAIRS[(y / 100) * 2];
+                t[2] = DIGIT_PAIRS[(y / 100) * 2 + 1];
+                t[3] = DIGIT_PAIRS[(y % 100) * 2];
+                t[4] = DIGIT_PAIRS[(y % 100) * 2 + 1];
+                t[5] = b'-';
+                t[6] = DIGIT_PAIRS[m * 2];
+                t[7] = DIGIT_PAIRS[m * 2 + 1];
+                t[8] = b'-';
+                t[9] = DIGIT_PAIRS[d * 2];
+                t[10] = DIGIT_PAIRS[d * 2 + 1];
+                // t[11] is the closing quote from the fill; 12..16 are padding
+                // that is written into the reserved tail and not counted.
+                buf.reserve(16);
+                unsafe {
+                    let dst = buf.as_mut_ptr().add(buf.len());
+                    std::ptr::copy_nonoverlapping(t.as_ptr(), dst, 16);
+                    buf.set_len(buf.len() + 12);
+                }
+            } else {
+                buf.push(b'"');
+                write_year_month_day(buf, y, m, d);
+                buf.push(b'"');
+            }
         }
     }
 }
@@ -126,6 +160,35 @@ pub(crate) const TFMT_SPACE: u32 = 1; // %Y-%m-%d %H:%M:%S
 #[allow(dead_code)] // chosen in R; Rust only needs to know it is not SPACE or TZ
 pub(crate) const TFMT_T: u32 = 2; // %Y-%m-%dT%H:%M:%S
 pub(crate) const TFMT_TZ: u32 = 3; // %Y-%m-%dT%H:%M:%SZ
+
+/// Is this timestamp cell missing, by the same rules `write_time_cell`
+/// applies?
+///
+/// A true NA, or an instant `format()` cannot render -- outside the writer's
+/// +-3e17 s range, or a year past what `strftime`'s `int tm_year` holds. R
+/// returns NA for those, and jsonlite then treats the cell as missing: the key
+/// is dropped in row mode. The Date column already answers this through
+/// `date_cell`; the timestamp column only tested for NA_real_, so an absurd
+/// instant came out as `"t":null` where `toJSON()` omitted it.
+///
+/// Anything within 6e16 s of the epoch is a year inside +-1.9e9 and cannot be
+/// out of range, so ordinary values pay one comparison.
+#[inline]
+pub(crate) fn time_cell_is_missing(v: f64) -> bool {
+    if v.is_nan() {
+        return unsafe { is_na_real(v) };
+    }
+    if v.abs() <= 6.0e16 {
+        return false;
+    }
+    if !(-3.0e17..=3.0e17).contains(&v) {
+        return true;
+    }
+    let t = v as i64;
+    let secs = t - ((t as f64 > v) as i64);
+    let (y, _, _) = civil_from_days(secs.div_euclid(86_400));
+    y > DATE_YEAR_MAX || y < DATE_YEAR_MIN
+}
 
 /// Writes one timestamp from *local civil* seconds since the epoch.
 ///
@@ -154,9 +217,11 @@ pub(crate) fn write_time_cell(buf: &mut Vec<u8>, v: f64, fmt: u32, na: NaMode) {
         buf.extend_from_slice(b"\"-Inf\"");
         return;
     }
-    // Truncation is towards -Inf here too, so -0.5 is 23:59:59 the day before.
-    let secs = v.floor();
-    if !(-3.0e17..=3.0e17).contains(&secs) {
+    // Range-checked on `v` before any cast so the arithmetic below cannot
+    // overflow. Checking `v` rather than its floor admits nothing new: above
+    // 2^52 every double is an integer, so the two agree there, and below it
+    // the floor is at most one less, which the year check rejects anyway.
+    if !(-3.0e17..=3.0e17).contains(&v) {
         if na == NaMode::String {
             buf.extend_from_slice(b"\"NA\"");
         } else {
@@ -164,7 +229,13 @@ pub(crate) fn write_time_cell(buf: &mut Vec<u8>, v: f64, fmt: u32, na: NaMode) {
         }
         return;
     }
-    let secs = secs as i64;
+    // Truncation is towards -Inf here too, so -0.5 is 23:59:59 the day
+    // before. `f64::floor` is a CRT call on the SSE2 baseline; the cast
+    // truncates toward zero exactly (inside 2^52 by construction, and above
+    // it there is no fraction to lose), and a negative value with a fraction
+    // needs one step down.
+    let t = v as i64;
+    let secs = t - ((t as f64 > v) as i64);
     // Euclidean division, so a negative epoch still lands on the right day
     // with a positive time of day.
     let days = secs.div_euclid(86_400);
@@ -175,6 +246,56 @@ pub(crate) fn write_time_cell(buf: &mut Vec<u8>, v: f64, fmt: u32, na: NaMode) {
             buf.extend_from_slice(b"\"NA\"");
         } else {
             buf.extend_from_slice(b"null");
+        }
+        return;
+    }
+
+    if (0..=9999).contains(&y) {
+        // The common case as one store: up to 22 bytes -- quote, date,
+        // separator, time, optional Z, quote -- built in a 24-byte stack
+        // array from the digit-pair table and copied in one go. It was up to
+        // twenty-two pushes, each with its own capacity check.
+        let y = y as usize;
+        let (mo, d) = (mo as usize, d as usize);
+        let mut t = [b'"'; 24];
+        t[1] = DIGIT_PAIRS[(y / 100) * 2];
+        t[2] = DIGIT_PAIRS[(y / 100) * 2 + 1];
+        t[3] = DIGIT_PAIRS[(y % 100) * 2];
+        t[4] = DIGIT_PAIRS[(y % 100) * 2 + 1];
+        t[5] = b'-';
+        t[6] = DIGIT_PAIRS[mo * 2];
+        t[7] = DIGIT_PAIRS[mo * 2 + 1];
+        t[8] = b'-';
+        t[9] = DIGIT_PAIRS[d * 2];
+        t[10] = DIGIT_PAIRS[d * 2 + 1];
+        let mut n = 11usize; // index of the closing quote for date-only
+        if fmt != TFMT_DATE {
+            t[11] = if fmt == TFMT_SPACE { b' ' } else { b'T' };
+            let h = (sod / 3600) as usize;
+            let mi = (sod / 60 % 60) as usize;
+            let se = (sod % 60) as usize;
+            t[12] = DIGIT_PAIRS[h * 2];
+            t[13] = DIGIT_PAIRS[h * 2 + 1];
+            t[14] = b':';
+            t[15] = DIGIT_PAIRS[mi * 2];
+            t[16] = DIGIT_PAIRS[mi * 2 + 1];
+            t[17] = b':';
+            t[18] = DIGIT_PAIRS[se * 2];
+            t[19] = DIGIT_PAIRS[se * 2 + 1];
+            n = 20;
+            if fmt == TFMT_TZ {
+                t[20] = b'Z';
+                n = 21;
+            }
+        }
+        // t[n] is the closing quote from the fill; past it is padding written
+        // into the reserved tail and not counted.
+        t[n] = b'"';
+        buf.reserve(24);
+        unsafe {
+            let dst = buf.as_mut_ptr().add(buf.len());
+            std::ptr::copy_nonoverlapping(t.as_ptr(), dst, 24);
+            buf.set_len(buf.len() + n + 1);
         }
         return;
     }
@@ -340,16 +461,25 @@ pub(crate) fn write_fixed_decimals(buf: &mut Vec<u8>, v: f64, d: usize) {
     let diff = tmp - frac as f64;
     let p10 = POW10_U[prec];
 
-    if diff > 0.5 {
-        frac += 1;
-        if frac >= p10 {
-            frac = 0;
-            whole += 1;
-        }
-    } else if diff == 0.5
-        && ((prec > 0 && frac & 1 == 1) || (prec == 0 && whole & 1 == 1))
-    {
-        frac += 1;
+    // modp_dtoa2's rounding -- up when past the half, and on an exact half
+    // only to even -- written as one boolean rather than an if / else-if. The
+    // truth table is unchanged: up = (diff > 0.5) | (diff == 0.5 & odd), with
+    // `odd` the last fractional digit at prec > 0 and the whole part at
+    // prec == 0 (where frac is always 0 and p10 is 1, so the carry below is
+    // what increments the whole part). On real data `diff > 0.5` is a coin
+    // flip, and the branch it compiled to mispredicted half the time; as a
+    // select it is 5-6 ns/value cheaper at four decimals.
+    //
+    // Guarded on `diff != 0.0`: a value exactly representable at this
+    // precision -- every whole number, 1.5 at one decimal -- cannot round, and
+    // on a column of them the select cost 5 ns/value that the old, perfectly
+    // predicted branch did not. The guard is itself a branch, but one that
+    // goes the same way for a whole column, so it predicts; only a column
+    // mixing exact and inexact values would pay for it.
+    if diff != 0.0 {
+        let odd = if prec > 0 { frac & 1 } else { (whole & 1) as u32 };
+        let up = (diff > 0.5) as u32 | ((diff == 0.5) as u32 & odd);
+        frac += up;
         if frac >= p10 {
             frac = 0;
             whole += 1;
@@ -445,10 +575,14 @@ pub(crate) fn write_fixed_decimals(buf: &mut Vec<u8>, v: f64, d: usize) {
         put!(k, b'0' + whole as u8);
         k += 1;
     }
-    if neg {
-        put!(k, b'-');
-        k += 1;
-    }
+    // Written unconditionally and counted only when negative: on mixed-sign
+    // data the branch here was an unpredictable jump on the hottest path. The
+    // store into rev[k] is harmless when the value is positive -- k is not
+    // advanced, so the byte is never reversed into the output. `neg` stays
+    // `v < 0.0`, which is false for -0.0, so negative zero still prints as "0"
+    // exactly as jsonlite does; a to_bits sign test would break that.
+    put!(k, b'-');
+    k += neg as usize;
 
     // resize() zero-fills and then every byte is overwritten, which is
     // twice the stores on the hottest formatting path in the package.

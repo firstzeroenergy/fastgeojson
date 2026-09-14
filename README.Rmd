@@ -36,7 +36,7 @@ bench_table <- function(id) {
 
 `fastgeojson` converts `sf` objects to GeoJSON FeatureCollections and generic R objects (`data.frame`, lists, vectors) to JSON strings.
 
-Implemented in Rust via **extendr**, it delivers **12–17× speedups** over existing R solutions on large datasets, with output byte-for-byte identical to `jsonlite::toJSON()`.
+Implemented in Rust via **extendr**, it delivers **13–17× speedups** over existing R solutions on large datasets, with output byte-for-byte identical to `jsonlite::toJSON()`.
 
 Results are ready for Shiny, Plumber, `leaflet::addGeoJSON()`, and any package that talks to JavaScript.
 
@@ -70,9 +70,9 @@ Most of what is left in those figures is not serialization. The same calls with 
 
 | | full call | `as_bytes = TRUE` | R's share |
 |---|---|---|---|
-| 1M × 4 columns | 54.3 ms | 12.6 ms | 77% |
-| 1M point features | 125.1 ms | 22.6 ms | 82% |
-| 10k polygons | 6.9 ms | 2.4 ms | 65% |
+| 1M rows × 4 columns | 54.0 ms | 11.9 ms | 78% |
+| 1M point features | 123.6 ms | 15.6 ms | 87% |
+| 10k polygons × 200 vertices | 44.7 ms | 7.0 ms | 84% |
 
 R charges about a nanosecond per byte to build a character vector, because it scans and hashes every byte to intern it in the CHARSXP cache. No serializer can go under that: *R Internals* requires every CHARSXP to be made through `mkCharLenCE`. See [`as_bytes`](#as_bytes) for when you can skip it entirely.
 
@@ -105,7 +105,11 @@ Four defaults now match `toJSON()`, so output can differ from 0.2.x:
 
 `Date` and `POSIXt` follow `jsonlite`: `POSIXt = "string"` uses `format()`, `"ISO8601"` emits `"2013-06-17T22:33:44"`, and `Date = "epoch"` returns days. Full list in `NEWS.md`.
 
+`sf_geojson_str()` and `df_json_str()` are gone; `as_json()` does both and dispatches on its input. Replace either with `as_json(x, ...)`.
+
 ## Installation
+
+Requires R 4.5 or later.
 
 ```r
 install.packages("fastgeojson")           # CRAN, once available
@@ -158,9 +162,9 @@ as_json(x, as_bytes = TRUE)   # a raw vector instead of a character vector
 
 `fastgeojson_threads(n)` sets the worker count: `1` disables parallelism, `0` restores automatic. The default is the whole machine, honouring `FASTGEOJSON_NUM_THREADS`, `RAYON_NUM_THREADS`, `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. Output is identical at any thread count.
 
-### as_bytes {#as_bytes}
+### as_bytes
 
-Returns the same bytes as a raw vector instead of a character vector, skipping the interning that is 65-82% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
+Returns the same bytes as a raw vector instead of a character vector, skipping the interning that is 78–87% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
 
 ```r
 con <- file("out.json", "wb")                          # a file
@@ -237,8 +241,8 @@ observe({
 - **Geometries:** POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON, GEOMETRYCOLLECTION, in XY, XYZ, XYM and XYZM. Any `sfc` is encoded as geometry wherever it appears.
 - **Vectors:** integer, double, logical, character, factor, complex, raw.
 - **Structures:** list columns, nested lists, matrices, arrays, nested data frames, tibbles.
-- **Time:** `Date`, `POSIXt`, `difftime`, `integer64`.
-- **Encodings:** output is always valid UTF-8; latin1 and native inputs are translated, and escaping matches `jsonlite` byte for byte.
+- **Time:** `Date`, `POSIXt`, `bit64::integer64` (exact digits, as `toJSON()` emits them). `difftime` is written as its numeric value, which `toJSON()` only does under `force = TRUE`.
+- **Encodings:** latin1 and native inputs are translated to UTF-8 and escaping matches `jsonlite` byte for byte. Bytes that are not valid UTF-8 pass through unchanged, exactly as `toJSON()` passes them; a `"bytes"`-marked string raises the same error `toJSON()` raises.
 
 The full `jsonlite::toJSON()` argument surface is supported.
 
@@ -255,7 +259,7 @@ The full `jsonlite::toJSON()` argument surface is supported.
 
 ## Development
 
-Rust in `src/rust/` as ten modules, R interface in `R/`, benchmarks and parity verifiers in `tools/bench/`. Built with **extendr**. `FASTGEOJSON_PROFILE=1` prints per-phase timings.
+Rust in `src/rust/`, R interface in `R/`, benchmarks and parity verifiers in `tools/bench/`. Built with **extendr**. `FASTGEOJSON_PROFILE=1` prints per-phase timings.
 
 Bug reports, feature requests, and contributions are very welcome.
 

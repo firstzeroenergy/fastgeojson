@@ -16,6 +16,13 @@ CARGO_BUILD_FLAGS = --lib @PROFILE@ @CRAN_FLAGS@ @TARGET_FLAG@
 # `all` and `clean_rust` are declared without commands so their prerequisites
 # merge with R's own shlib rules; `clean_rust: $(SHLIB)` then guarantees the
 # cleanup runs AFTER linking, even under `make -j`.
+#
+# Deleting rust/target here is what keeps `checking compiled code` clean.
+# After `make all`, R CMD INSTALL under --as-cran runs `make symbols.rds`,
+# which reads symbols from every `.a` under the package that matches a -l in
+# PKG_LIBS; libfastgeojson.a carries Rust's std, whose `abort`/`exit`
+# references would then be attributed to it ("Object: rust/target/...") and
+# graded a WARNING. Gone before that step, nothing is attributable.
 all: $(SHLIB) clean_rust
 
 clean_rust: $(SHLIB)
@@ -26,10 +33,17 @@ clean:
 
 $(SHLIB): $(STATLIB)
 
+# rustup installs to $HOME/.cargo/bin, which a login shell puts on PATH but
+# the environment R CMD INSTALL inherits often does not -- RStudio Server, a
+# container, a cron job. tools/msrv.R adds that directory before its own
+# probe, so configure reported the toolchain found and this recipe then
+# could not see it: "rustc: command not found" on a clean rocker image. The
+# same addition here. PATH set on one recipe line is not seen by the next,
+# so each command that needs it sets it in its own shell.
 $(STATLIB):
 	@echo "== fastgeojson: Rust toolchain =="
-	rustc --version
-	cargo --version
+	PATH="$(PATH):$(HOME)/.cargo/bin" rustc --version
+	PATH="$(PATH):$(HOME)/.cargo/bin" cargo --version
 
 	@echo "== fastgeojson: vendored dependencies =="
 	mkdir -p rust/.cargo
@@ -42,6 +56,7 @@ $(STATLIB):
 	fi
 
 	@echo "== fastgeojson: cargo build (target: @TARGET@) =="
+	PATH="$(PATH):$(HOME)/.cargo/bin"; export PATH; \
 	CARGO_HOME="`pwd`/rust/.cargo"; export CARGO_HOME; \
 	cargo build $(CARGO_BUILD_FLAGS) \
 		--manifest-path=rust/Cargo.toml \

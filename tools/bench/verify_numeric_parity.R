@@ -262,5 +262,43 @@ for (nm in c("subnormal", "tiny normal")) {
   }
 }
 
+
+# ------------------------------------------------------------------
+# bit64::integer64
+# ------------------------------------------------------------------
+# jsonlite converts these through its own C routine to the exact decimal
+# digits and emits them unquoted -- a value past 2^53 keeps every digit --
+# with NA under the numeric rule. We used to hand the writer as.character(),
+# which came out quoted, and NA came out as null. Pre-rendered now, and the
+# `in_df` flag no longer leaks from a frame into its list-column elements.
+if (requireNamespace("bit64", quietly = TRUE)) {
+  cat("\n== integer64 ==\n")
+  i64 <- bit64::as.integer64
+  x  <- i64(c("1", "1099511627776", "1152921504606846976", "9223372036854775807",
+              "-9223372036854775807", "-5", "0"))
+  xn <- i64(c(1, NA, 3))
+  cmp(x, "integer64 bare, exact past 2^53")
+  cmp(x, "integer64 bare, digits = NA", digits = NA)
+  cmp(xn, "integer64 bare NA");  cmp(xn, "integer64 bare NA, na = null", na = "null")
+  cmp(xn, "integer64 bare NA, na = string", na = "string")
+  cmp(data.frame(i = x), "integer64 frame")
+  for (m in c("rows", "columns", "values")) {
+    cmp(data.frame(i = xn, j = 1:3), paste("integer64 frame NA,", m), dataframe = m)
+    cmp(data.frame(i = xn), paste("integer64 frame NA null,", m), dataframe = m, na = "null")
+    cmp(data.frame(i = xn), paste("integer64 frame NA string,", m), dataframe = m, na = "string")
+  }
+  cmp(list(a = x), "integer64 in a list"); cmp(list(a = xn, b = "x"), "integer64 list NA")
+  cmp(list(a = i64(7)), "integer64 length 1"); cmp(list(a = i64(7)), "integer64 length 1, auto_unbox", auto_unbox = TRUE)
+  cmp(i64(7), "integer64 bare length 1, auto_unbox", auto_unbox = TRUE)
+  cmp(i64(integer(0)), "integer64 empty"); cmp(data.frame(i = i64(integer(0))), "integer64 empty frame")
+  cmp(list(x = data.frame(i = xn)), "integer64 nested frame")
+  d <- data.frame(i = xn); d$l <- list(i64(1:2), i64(3), i64(NA))
+  cmp(d, "integer64 list column")
+  for (m in c("columns", "values")) cmp(d, paste("integer64 list column,", m), dataframe = m)
+  # the in_df leak this fixed also reached mongo timestamps in a list column
+  b <- as.POSIXct("2024-01-01", tz = "UTC"); dm <- data.frame(i = 1:2); dm$t <- list(b + 1:2, b + NA)
+  cmp(dm, "mongo timestamps in a list column", POSIXt = "mongo")
+}
+
 cat(sprintf("\n%d failure(s)\n", fails))
 if (fails > 0) quit(status = 1)

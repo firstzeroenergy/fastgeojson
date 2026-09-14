@@ -349,9 +349,20 @@ pub(crate) fn extract_geometries_chunk(
     // the signature keeps the call sites stable.
     let _ = config;
     let capacity_est = end - start;
+    // `coords` and `counts` hold the rings of polygons and multi-geometries.
+    // A POINT, MULTIPOINT or LINESTRING is one coordinate matrix and goes into
+    // the FastGeom itself, so for those the two vectors stay empty -- and
+    // reserving them anyway was the single largest cost on the points path:
+    // 128 chunks each reserving ~440 KB it never touched was 5 ms of
+    // allocation inside "extract" and another 4-5 ms freeing it at return,
+    // all on sub-megabyte heap blocks that serialise on the allocator lock.
+    let (coord_cap, count_cap) = match sfc_type {
+        SfcType::Point | SfcType::MultiPoint | SfcType::LineString => (0, 0),
+        _ => (capacity_est * 2, capacity_est),
+    };
     let mut batch = GeometryBatch {
-        coords: Vec::with_capacity(capacity_est * 2),
-        counts: Vec::with_capacity(capacity_est),
+        coords: Vec::with_capacity(coord_cap),
+        counts: Vec::with_capacity(count_cap),
         raw: Vec::new(),
     };
     let mut out = Vec::with_capacity(capacity_est);

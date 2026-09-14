@@ -14,6 +14,13 @@ CARGO_BUILD_FLAGS = --lib @PROFILE@ @CRAN_FLAGS@ @TARGET_FLAG@
 # `all` and `clean_rust` are declared without commands so their prerequisites
 # merge with R's own shlib rules; `clean_rust: $(SHLIB)` then guarantees the
 # cleanup runs AFTER linking, even under `make -j`.
+#
+# Deleting rust/target here is what keeps `checking compiled code` clean.
+# After `make all`, R CMD INSTALL under --as-cran runs `make symbols.rds`,
+# which reads symbols from every `.a` under the package that matches a -l in
+# PKG_LIBS; libfastgeojson.a carries Rust's std, whose `abort`/`exit`
+# references would then be attributed to it ("Object: rust/target/...") and
+# graded a WARNING. Gone before that step, nothing is attributable.
 all: $(SHLIB) clean_rust
 
 clean_rust: $(SHLIB)
