@@ -38,11 +38,11 @@ bench_table <- function(id) {
 
 `fastgeojson` converts `sf` objects to GeoJSON FeatureCollections and generic R objects (`data.frame`, lists, vectors) to JSON strings.
 
-Implemented in Rust via **extendr**, it delivers **6–27× speedups** over `jsonlite` and `geojsonsf` on large datasets at equal output, and 2.7–3.2× over `yyjsonr`, with output byte-for-byte identical to `jsonlite::toJSON()` under the same arguments.
+Implemented in Rust via **extendr**, it writes lossless numbers, runs in parallel, and delivers **6–27× speedups** over `jsonlite` and `geojsonsf` on large datasets at equal output, and 2.7–3.2× over `yyjsonr`.
 
 Results are ready for Shiny, Plumber, `leaflet::addGeoJSON()`, and any package that talks to JavaScript.
 
-> **Status: v0.3.0** — `as_json()` takes `jsonlite::toJSON()`'s arguments, in the same order. Two defaults differ, both deliberately: numbers are lossless, and `sf` objects become GeoJSON. See [Upgrading](#upgrading-from-01x-or-02x).
+> **Status: v0.3.0** — `as_json()` takes `jsonlite::toJSON()`'s arguments, in the same order, and follows its output conventions; two defaults differ: numbers are lossless, and `sf` objects become GeoJSON. See [Upgrading](#upgrading-from-01x-or-02x).
 
 ## Performance
 
@@ -78,7 +78,7 @@ Most of each call is R interning the result as a string, at about a nanosecond p
 
 ## Correctness
 
-jsonlite's own `toJSON` test suite (jsonlite 2.0.0, in `tests/testthat/` with `toJSON()` bound to `as_json()`) passes with no failures and no skips, including its `sf` tests against GDAL's GeoJSON writer.
+Output follows `jsonlite`'s conventions: jsonlite's own `toJSON` test suite (jsonlite 2.0.0, in `tests/testthat/` with `toJSON()` bound to `as_json()`) passes with no failures and no skips, including its `sf` tests against GDAL's GeoJSON writer.
 
 Two defaults differ. `jsonlite` rounds numbers to 4 decimal places; `as_json()` writes the shortest decimal that reads back as the same double (`digits = 4` gives `toJSON()`'s output). And `jsonlite` writes `sf` objects as a record array; `as_json()` writes a `FeatureCollection`.
 
@@ -207,7 +207,7 @@ as_json(df, dataframe = "columns")
 #> {"id":[1,2],"name":["Alice","Bob"],"score":[98.5,"NA"]}
 ```
 
-Row-oriented output omits missing fields; column-oriented output keeps array lengths aligned. Both match `jsonlite`.
+Row-oriented output omits missing fields; column-oriented output keeps array lengths aligned, as `jsonlite` does.
 
 ```r
 as_json(list(val = 5))
@@ -249,7 +249,7 @@ The full `jsonlite::toJSON()` argument surface is supported.
 ## Implementation
 
 - Rows and geometries are split into chunks by estimated work and serialized in parallel; small inputs stay serial.
-- Numbers: the fixed-decimal path ports `jsonlite`'s `modp_dtoa2`; `digits = Inf` uses Żmij, byte-identical to `ryu`.
+- Numbers: the fixed-decimal path ports `jsonlite`'s `modp_dtoa2`; `digits = Inf` uses Żmij.
 - Strings are escaped straight from R's storage, one copy each, through a 256-entry table.
 - Geometries are flattened into contiguous coordinate arrays and written in one pass.
 - Dates and timestamps are computed, not formatted: tens of nanoseconds per value against `format()`'s microseconds.

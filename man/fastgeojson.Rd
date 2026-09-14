@@ -85,20 +85,22 @@ A length-one character vector of class \code{"json"}, or
 returns an unclassed raw vector holding the same bytes.
 }
 \description{
-\code{as_json()} is a high-performance, drop-in replacement for
-\code{\link[jsonlite:toJSON]{jsonlite::toJSON()}}. It takes the same arguments, in the same order, and
-produces byte-identical output under the same arguments. Two defaults
-differ deliberately: numbers are written losslessly (\code{digits = Inf}, where
-\code{toJSON()} rounds to 4 decimal places) and \code{sf} objects become GeoJSON
-(\code{sf = "geojson"}, where \code{toJSON()} writes a record array). The
-encoders are implemented in Rust via \strong{extendr} and parallelised with
-\code{rayon}, and \code{sf} objects gain a dedicated GeoJSON path.
+\code{as_json()} serializes R objects to JSON, and \code{sf} objects to GeoJSON, in
+parallel and with lossless numbers. The encoders are implemented in Rust
+via \strong{extendr}.
+
+It takes the arguments of \code{\link[jsonlite:toJSON]{jsonlite::toJSON()}}, in the same order, and
+follows jsonlite's output conventions: jsonlite's own test suite runs
+against it. Two defaults differ: numbers are written losslessly
+(\code{digits = Inf}, where \code{toJSON()} rounds to 4 decimal places) and \code{sf}
+objects become GeoJSON (\code{sf = "geojson"}, where \code{toJSON()} writes a record
+array).
 }
 \details{
-\strong{Drop-in use.} Because the signature matches \code{jsonlite::toJSON()}
-argument-for-argument, existing code can usually be ported by changing only
-the function name. Unknown arguments are accepted through \code{...} and passed
-to the encoder, exactly as \code{toJSON()} does.
+\strong{Coming from jsonlite.} Code that calls \code{toJSON()} with named
+arguments can call \code{as_json()} with the same ones; pass \code{digits = 4} (and
+\code{sf = "dataframe"} for \code{sf} input) to reproduce \code{toJSON()}'s defaults.
+Unknown arguments are accepted through \code{...}, as \code{toJSON()} does.
 
 \strong{Encoding strategy.} \code{as_json()} inspects \code{x} and dispatches to the
 appropriate Rust encoder:

@@ -3,13 +3,13 @@
 ## Breaking changes
 
 * `sf_geojson_str()` and `df_json_str()` are removed. `as_json()` replaces both and dispatches on its input.
-* `as_json()` takes `jsonlite::toJSON()`'s arguments in the same order, so positional arguments after `x` change meaning, and its output matches `toJSON()` byte for byte under the same arguments. Two defaults differ: numbers are lossless (`digits = Inf`; `digits = 4` gives `toJSON()`'s output) and `sf` objects become GeoJSON (`sf = "geojson"`).
+* `as_json()` takes `jsonlite::toJSON()`'s arguments in the same order, so positional arguments after `x` change meaning, and follows jsonlite's output conventions. Two defaults differ: numbers are lossless (`digits = Inf`; `digits = 4` gives `toJSON()`'s output) and `sf` objects become GeoJSON (`sf = "geojson"`).
 * Requires R 4.5 or later.
 
 ## Fixes
 
 * Memory safety: worker threads read no attributes and hold no pointers into objects the call created; `gctorture` tests cover the cases that used to fail.
-* Parity with `toJSON()` on every type it handles — `Date`, `POSIXt`, `factor`, `complex`, `raw`, matrices, nested and list-column frames, `integer64`, non-UTF-8 encodings. jsonlite's own test suite runs against `as_json()` with no failures.
+* `Date`, `POSIXt`, `factor`, `complex`, `raw`, matrices, nested and list-column frames, `integer64` and non-UTF-8 encodings now follow `toJSON()`; jsonlite's own test suite runs against `as_json()` with no failures.
 
 ## Performance
 

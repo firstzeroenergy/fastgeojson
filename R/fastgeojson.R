@@ -1,20 +1,22 @@
 #' Fast Serialization of R Objects to JSON and GeoJSON
 #'
 #' @description
-#' `as_json()` is a high-performance, drop-in replacement for
-#' [jsonlite::toJSON()]. It takes the same arguments, in the same order, and
-#' produces byte-identical output under the same arguments. Two defaults
-#' differ deliberately: numbers are written losslessly (`digits = Inf`, where
-#' `toJSON()` rounds to 4 decimal places) and `sf` objects become GeoJSON
-#' (`sf = "geojson"`, where `toJSON()` writes a record array). The
-#' encoders are implemented in Rust via **extendr** and parallelised with
-#' `rayon`, and `sf` objects gain a dedicated GeoJSON path.
+#' `as_json()` serializes R objects to JSON, and `sf` objects to GeoJSON, in
+#' parallel and with lossless numbers. The encoders are implemented in Rust
+#' via **extendr**.
+#'
+#' It takes the arguments of [jsonlite::toJSON()], in the same order, and
+#' follows jsonlite's output conventions: jsonlite's own test suite runs
+#' against it. Two defaults differ: numbers are written losslessly
+#' (`digits = Inf`, where `toJSON()` rounds to 4 decimal places) and `sf`
+#' objects become GeoJSON (`sf = "geojson"`, where `toJSON()` writes a record
+#' array).
 #'
 #' @details
-#' \strong{Drop-in use.} Because the signature matches `jsonlite::toJSON()`
-#' argument-for-argument, existing code can usually be ported by changing only
-#' the function name. Unknown arguments are accepted through `...` and passed
-#' to the encoder, exactly as `toJSON()` does.
+#' \strong{Coming from jsonlite.} Code that calls `toJSON()` with named
+#' arguments can call `as_json()` with the same ones; pass `digits = 4` (and
+#' `sf = "dataframe"` for `sf` input) to reproduce `toJSON()`'s defaults.
+#' Unknown arguments are accepted through `...`, as `toJSON()` does.
 #'
 #' \strong{Encoding strategy.} `as_json()` inspects `x` and dispatches to the
 #' appropriate Rust encoder:
