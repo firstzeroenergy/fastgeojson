@@ -3,7 +3,9 @@
 # `toJSON()` here is bound to fastgeojson::as_json() by that helper.
 
 test_that("Test NULL values", {
-  namedlist <- structure(list(), .Names = character(0))
+  # jsonlite writes `.Names =`; R-devel (Sept 2026) notes that spelling as
+  # deprecated, so this is the one edit in the ported file.
+  namedlist <- structure(list(), names = character(0))
   x <- NULL
   y <- list(a = NULL, b = NA)
   z <- list(a = 1, b = character(0))
