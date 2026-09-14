@@ -2,8 +2,11 @@
 #'
 #' @description
 #' `as_json()` is a high-performance, drop-in replacement for
-#' [jsonlite::toJSON()]. It takes the same arguments, in the same order, with
-#' the same defaults, and is intended to produce byte-identical output. The
+#' [jsonlite::toJSON()]. It takes the same arguments, in the same order, and
+#' produces byte-identical output under the same arguments. Two defaults
+#' differ deliberately: numbers are written losslessly (`digits = Inf`, where
+#' `toJSON()` rounds to 4 decimal places) and `sf` objects become GeoJSON
+#' (`sf = "geojson"`, where `toJSON()` writes a record array). The
 #' encoders are implemented in Rust via **extendr** and parallelised with
 #' `rayon`, and `sf` objects gain a dedicated GeoJSON path.
 #'
@@ -25,11 +28,13 @@
 #'
 #' \strong{Type mapping.}
 #' \itemize{
-#'   \item \strong{Numeric:} JSON numbers, rounded to `digits` decimal places.
+#'   \item \strong{Numeric:} JSON numbers, exact by default; see `digits`.
 #'     `NA`, `NaN`, `Inf` and `-Inf` follow the `na` argument.
 #'   \item \strong{Logical:} `true` / `false`.
-#'   \item \strong{Character:} JSON strings. Output is always valid UTF-8;
-#'     latin1- and native-encoded inputs are translated.
+#'   \item \strong{Character:} JSON strings. latin1- and native-encoded
+#'     inputs are translated to UTF-8; bytes that are not valid UTF-8 pass
+#'     through unchanged, as `toJSON()` passes them, and a `"bytes"`-marked
+#'     string raises the error `toJSON()` raises.
 #'   \item \strong{Factor:} labels, or integer codes when `factor = "integer"`.
 #'   \item \strong{Date / POSIXt:} controlled by `Date` and `POSIXt`.
 #'   \item \strong{complex / raw:} controlled by `complex` and `raw`.
@@ -39,7 +44,8 @@
 #'
 #' @param x The object to serialize.
 #' @param dataframe How to encode data frames: `"rows"` (default,
-#'   `[{"a":1},{"a":2}]`) or `"columns"` (`{"a":[1,2]}`).
+#'   `[{"a":1},{"a":2}]`), `"columns"` (`{"a":[1,2]}`) or `"values"`
+#'   (`[[1],[2]]`, one array per row without names).
 #' @param matrix How to encode matrices: `"rowmajor"` (default) or
 #'   `"columnmajor"`.
 #' @param Date How to encode `Date`: `"ISO8601"` (default, `"2015-01-01"`) or
@@ -58,9 +64,11 @@
 #'   frame output omits the key entirely, matching `toJSON()`.
 #' @param auto_unbox If `TRUE`, length-one atomic vectors become JSON scalars
 #'   rather than length-one arrays. Defaults to `FALSE`.
-#' @param digits Number of decimal places for numeric values, or `NA` for the
-#'   shortest round-trippable representation. Wrap in [base::I()] to interpret
-#'   as *significant* digits instead. Defaults to `4`, as in `toJSON()`.
+#' @param digits Precision of numeric values. The default, `Inf`, writes the
+#'   shortest decimal that reads back as the same double, so nothing is lost.
+#'   A number is a count of decimal places (`toJSON()`'s default is `4`);
+#'   wrap it in [base::I()] to count *significant* digits instead; `NA` is
+#'   `toJSON()`'s 15 significant digits.
 #' @param pretty If `TRUE`, indent the output by two spaces; a number sets the
 #'   indent width.
 #' @param force If `TRUE`, strip S3 classes that would otherwise raise an
@@ -77,8 +85,8 @@
 #'   CHARSXP cache, at roughly a nanosecond per byte, and on a large result
 #'   that costs several times the serialization itself. Use it when the JSON
 #'   is on its way out of R -- `writeBin()` to a file or connection, an HTTP
-#'   response body, a socket. Writing a 17.7 MB result to a file takes 15 ms
-#'   through `writeBin()` against 117 ms through `writeLines()` on the
+#'   response body, a socket. Writing an 18 MB result to a file takes 9 ms
+#'   through `writeBin()` against 101 ms through `writeLines()` on the
 #'   character result.
 #'
 #'   It is not a route to a string: `rawToChar()` pays the interning cost
@@ -129,7 +137,7 @@ as_json <- function(
     null = c("list", "null"),
     na = c("null", "string"),
     auto_unbox = FALSE,
-    digits = 4,
+    digits = Inf,
     pretty = FALSE,
     force = FALSE,
     ...) {
@@ -181,18 +189,21 @@ as_json <- function(
   }
 
   # ---- digits ----------------------------------------------------------
-  # digits = Inf asks for the shortest decimal that reads back as the same
-  # double: lossless, and smaller and faster than either alternative. It is
+  # digits = Inf, the default, asks for the shortest decimal that reads back
+  # as the same double: lossless, and smaller and faster than either
+  # alternative. It is
   # not a jsonlite mode -- toJSON() warns and falls back to digits = NA -- and
   # is the only exact one here, since digits = NA keeps 15 significant digits
   # and about 94% of doubles from real arithmetic need 16 or 17.
   digits_int <- NULL
   if (length(digits) == 1L && is.numeric(digits) && !is.na(digits) &&
       is.infinite(digits) && digits > 0) {
-    digits_int <- 255L
+    digits_int <- .DIGITS_SHORTEST
   } else if (!is.null(digits) && !(length(digits) == 1L && is.na(digits))) {
     d <- suppressWarnings(as.integer(unclass(digits)))
-    if (length(d) == 1L && !is.na(d)) digits_int <- d
+    # Every count from 16 up renders the same way, 17 significant digits as
+    # in toJSON(); the clamp keeps a user's 255 off the code for Inf.
+    if (length(d) == 1L && !is.na(d)) digits_int <- min(d, 254L)
   }
 
   if (as_bytes && !identical(pretty, FALSE)) {
@@ -630,7 +641,7 @@ is_true_na <- function(v) {
   na_txt <- switch(opts$na %||% "smart", string = '"NA"', null = "null", NA_character_)
   part <- function(key, val) {
     s <- vapply(val, function(z) {
-      if (is.na(z)) na_txt else as.character(as_json(z, auto_unbox = TRUE, digits = opts$digits))
+      if (is.na(z)) na_txt else as.character(as_json(z, auto_unbox = TRUE, digits = .digits_arg(opts$digits)))
     }, character(1))
     ifelse(is.na(s), NA_character_, paste0('"', key, '":', s))
   }
@@ -643,13 +654,19 @@ is_true_na <- function(v) {
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# What `digits = Inf` becomes on the way to the writer: the code for "shortest
+# decimal that reads back as the same double". R's own formatters reject it
+# as a digit count, so every R-side encoder that renders a number must test
+# for it rather than pass it on.
+.DIGITS_SHORTEST <- 255L
+
 .encode_complex <- function(v, opts) {
   if (identical(opts$complex, "list")) {
     if (isTRUE(opts$in_df)) return(.encode_complex_rows(v, opts))
     return(list(real = Re(v), imaginary = Im(v)))
   }
   d <- if (is.null(opts$digits)) 5L else opts$digits
-  out <- prettyNum(x = v, digits = d)
+  out <- if (identical(d, .DIGITS_SHORTEST)) .complex_shortest(v) else prettyNum(x = v, digits = d)
   # jsonlite's complex method defaults to na = "string", so a non-finite value
   # keeps prettyNum's literal "NA" text -- except inside a data.frame, whose
   # method passes na = "NA" (omit) down to its columns.
@@ -662,6 +679,10 @@ is_true_na <- function(v) {
   }
   if (!literal_na) out[!is.finite(v)] <- NA_character_
   if (length(v)) names(out) <- names(v)
+  # prettyNum() and .complex_shortest() both return a plain vector; a complex
+  # matrix at top level came out flat where toJSON() nests it by row. (Only
+  # when there is a dim: `dim(out) <- NULL` would strip the names too.)
+  if (!is.null(dim(v))) dim(out) <- dim(v)
   out
 }
 
@@ -681,6 +702,32 @@ is_true_na <- function(v) {
 }
 
 .compact_ints <- function(v) paste0("[", paste(v, collapse = ","), "]")
+
+# The user-facing `digits` that an internal digits code stands for, for
+# encoders that call as_json() again on a piece of their input.
+.digits_arg <- function(d) if (identical(d, .DIGITS_SHORTEST)) Inf else d
+
+# prettyNum()'s layout -- real, signed imaginary, "i" -- with each part the
+# shortest decimal that reads back exactly. jsonlite has no lossless setting
+# for complex at all: toJSON(z, digits = NA) errors inside prettyNum().
+# Non-finite parts follow prettyNum(): "Inf+1i", "1-Infi", "NaN+1i", and the
+# literal "NA" whenever either part is NA, for .encode_complex to treat as it
+# treats prettyNum's.
+.complex_shortest <- function(v) {
+  if (!length(v)) return(character())
+  parts <- function(p) {
+    # c() drops dim and names: Re() of a matrix is a matrix, and the writer
+    # would nest it. na = "string" renders NA, NaN and Inf as quoted words;
+    # strip the quotes.
+    s <- as.character(as_json(c(p), digits = Inf, na = "string"))
+    gsub('"', "", strsplit(substr(s, 2L, nchar(s) - 1L), ",", fixed = TRUE)[[1L]], fixed = TRUE)
+  }
+  re <- Re(v)
+  im <- Im(v)
+  out <- paste0(parts(re), ifelse(!is.na(im) & im < 0, "-", "+"), parts(abs(im)), "i")
+  out[(is.na(re) & !is.nan(re)) | (is.na(im) & !is.nan(im))] <- "NA"
+  out
+}
 
 # Minimal base64 encoder so we do not depend on jsonlite at run time.
 .base64 <- function(v) {

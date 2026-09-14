@@ -34,3 +34,5 @@
 ^tools/bench$
 ^tools/build_readme\.R$
 ^tools/rust-test\.sh$
+^tests/testthat/_problems$
+^tests/testthat/testthat-problems\.rds$

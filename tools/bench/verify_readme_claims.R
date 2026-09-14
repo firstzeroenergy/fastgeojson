@@ -37,10 +37,12 @@ eq(as_json(p),
    '{"type":"FeatureCollection","name":"sfdata","features":[{"type":"Feature","properties":{"id":1},"geometry":{"type":"Point","coordinates":[1,2]}}]}',
    "sf -> FeatureCollection")
 
-cat("== digits default is 4, as in jsonlite (BREAKING vs 0.2.2) ==\n")
-eq(as_json(pi), "[3.1416]", "as_json(pi) -> [3.1416]")
-eq(as_json(pi, digits = NA), "[3.14159265358979]", "digits = NA -> full precision")
-ok(identical(as.character(as_json(pi)), as.character(toJSON(pi))), "matches jsonlite at defaults")
+cat("== digits defaults to Inf: lossless; 4 reproduces jsonlite ==\n")
+eq(as_json(pi), "[3.141592653589793]", "as_json(pi) -> [3.141592653589793] (lossless default)")
+eq(as_json(pi, digits = 4), "[3.1416]", "as_json(pi, digits = 4) -> [3.1416]")
+eq(as_json(0.000151481324748), "[0.000151481324748]", "projection scale survives the default")
+eq(as_json(pi, digits = NA), "[3.14159265358979]", "digits = NA -> jsonlite's 15 significant digits")
+ok(identical(as.character(as_json(pi, digits = 4)), as.character(toJSON(pi))), "matches jsonlite under its arguments")
 
 cat("== geometry types, incl. the one 0.2.2 wrongly claimed ==\n")
 geoms <- list(

@@ -18,22 +18,25 @@ validating against jsonlite's own test suite.
   argument, in the same order, and accepts `...`. Code that passed arguments
   positionally beyond `x` must be updated -- `as_json(df, "columns")` now means
   `dataframe = "columns"`, where previously position 2 was `auto_unbox`.
-* Several defaults changed to match `toJSON()`:
-  * `digits` is now `4` (was full `ryu` precision). `digits = NA` matches
-    `toJSON()`, which is 15 significant digits; pass `digits = Inf` for the
-    shortest representation that round-trips exactly.
-  * `keep_vec_names` is now `FALSE` (was `TRUE`), so named atomic vectors
-    become arrays rather than objects. Setting it to `TRUE` emits the same
-    deprecation message jsonlite does.
-  * `json_verbatim` is now `FALSE` (was `TRUE`).
-  * `UTC` is now `FALSE` (was `TRUE`), so timestamps are no longer silently
-    shifted to UTC.
-* `POSIXt = "string"` (the default) now uses R's own `format()`, e.g.
-  `"2013-06-17 22:33:44"`; `POSIXt = "ISO8601"` emits
-  `"2013-06-17T22:33:44"` with no `Z` suffix. The two modes were previously
-  swapped relative to jsonlite.
-* `Date = "epoch"` now returns **days** since 1970-01-01, as jsonlite does. It
-  previously returned milliseconds -- a factor of 86,400,000.
+* Output at the defaults changes where 0.2.2 differed from `toJSON()`,
+  measured by serializing the same inputs with both versions: a missing value
+  in a row-oriented frame drops its key instead of writing `null`; bare
+  numeric `NA`, `NaN` and `Inf` become the strings `"NA"`, `"NaN"`, `"Inf"`
+  (`na = "null"` restores `null` in both cases); matrices nest by row instead
+  of flattening; control characters take the short escapes (`\n`, not
+  `\u000A`); a FeatureCollection carries `"name":"sfdata"`; a whole
+  coordinate prints as `3`, not `3.0`; `-0` keeps its sign.
+* Numbers are otherwise unchanged: 0.2.2 had no `digits` argument and always
+  wrote them losslessly, which is now the default `digits = Inf`;
+  `digits = 4` gives `toJSON()`'s output.
+* Every other `toJSON()` argument is new -- `matrix`, `Date`, `POSIXt`,
+  `factor`, `complex`, `raw`, `pretty`, `force`, `keep_vec_names`,
+  `json_verbatim`, `UTC`, `rownames`, `always_decimal`, `use_signif` -- with
+  jsonlite's defaults. For `keep_vec_names`, `json_verbatim` and `UTC` that
+  default is what 0.2.2 did anyway: named vectors are arrays, `"json"`
+  strings are escaped, timestamps keep their zone. `POSIXt = "string"` uses
+  R's `format()`, `"ISO8601"` emits `"2013-06-17T22:33:44"` with no `Z`, and
+  `Date = "epoch"` is days since 1970-01-01.
 
 ## Correctness
 
@@ -47,7 +50,8 @@ validating against jsonlite's own test suite.
   `\t`, `\n`, `\f` and `\r`, lowercase `\u00xx` for other control bytes, and
   the solidus escaped only when it follows `<` (so an embedded `</script>`
   cannot terminate an enclosing script block).
-* Whole doubles up to 2^53 no longer gain a spurious `.0` suffix.
+* Whole doubles below 1e16 print without a `.0` suffix. 0.2.2 wrote `3.0`
+  for a coordinate of 3, and the shortest writer stopped short at 2^53.
 * Nested data frames now emit `_row` for non-default row names.
 * A data-frame-valued column (as produced by `tidyr::nest()`) is now encoded as
   one object per row. It was previously transposed, giving the first row the
@@ -319,13 +323,15 @@ removes. Fixed, and covered by 21 assertions under `gctorture(TRUE)` in
   the first call, even for a three-row data frame.
 * `pretty` is supported, reproducing jsonlite's layout (scalar-only arrays stay
   on one line; objects expand).
-* `digits = Inf` writes the shortest decimal that reads back as the same
-  double. It is the only lossless setting: `digits = NA` keeps 15 significant
-  digits, so `pi` becomes `3.14159265358979`, and about 94% of doubles arising
-  from real arithmetic need 16 or 17. `digits = 22` is exact but always writes
-  17 digits, which is 2 to 63% more output than necessary depending on the
-  data. `toJSON()` warns and falls back to `digits = NA` for a non-integer
-  `digits`, so nothing that works against jsonlite changes meaning.
+* `digits = Inf`, the default, writes the shortest decimal that reads back as
+  the same double. It is the only lossless setting: `digits = NA` keeps 15
+  significant digits, so `pi` becomes `3.14159265358979`, and about 94% of
+  doubles arising from real arithmetic need 16 or 17. `digits = 22` is exact
+  but always writes 17 digits, which is 2 to 63% more output than necessary
+  depending on the data. `toJSON()` warns and falls back to `digits = NA` for
+  a non-integer `digits`, so nothing that works against jsonlite changes
+  meaning. `complex = "string"` writes each part shortest in `prettyNum()`'s
+  layout; jsonlite has no lossless setting for complex at all.
 * `as_bytes = TRUE` returns a raw vector instead of a character vector.
   R creates a character vector at about 1 GB/s, because it hashes every byte
   to intern the string in its global CHARSXP cache; for a 49 MB result that is
@@ -337,13 +343,14 @@ removes. Fixed, and covered by 21 assertions under `gctorture(TRUE)` in
 ### `as_bytes` was undocumented
 
 `as_bytes = TRUE` returns the result as a raw vector instead of a character
-vector, skipping the string interning that is 65% to 82% of a large call. It
+vector, skipping the string interning that is 83% to 87% of a large call. It
 has worked for some time but was missing from `?as_json`, whose `\value` also
 claimed a character vector unconditionally. Now documented there and in the
 README.
 
-Writing a 17.7 MB result to a file: 15 ms via `writeBin()` on the raw vector,
-117 ms via `writeLines()` on the character one, 488 ms via `jsonlite`. Below
+Writing an 18 MB result to a file: 9 ms via `writeBin()` on the raw vector,
+101 ms via `writeLines()` on the character one, 415 ms via
+`jsonlite::write_json()` end to end. Below
 about a megabyte it makes no practical difference.
 
 For htmlwidgets -- `leaflet::addGeoJSON()`, `deckgl`, `mapdeck` -- use the
@@ -351,6 +358,10 @@ default. A raw vector is base64-encoded into the widget payload, which the
 browser cannot use and which is 37% larger.
 
 ## Performance
+
+Against 0.2.2 on the README's three shapes, at identical output: 1M rows x 4
+columns 90 -> 72 ms, 1M point features 231 -> 176 ms, 10k polygons 130 -> 93
+ms (20-28% faster), on top of the parity work above.
 
 Serialization was profiled and reworked against a 21-shape benchmark corpus
 (`tools/bench/`), measured at one thread and at full width, with every timed
@@ -1003,9 +1014,10 @@ geojsonsf), on **wall-clock time for the same input**: faster on all 21
 shapes single-threaded, by 1.1x to 7.1x, and on all 21 at full width, by 1.1x
 to 7.1x. Measured on throughput *per byte* instead, it wins 17 of 21
 single-threaded and 20 of 21 at full width; the exceptions are all shapes
-where the alternative emits close to twice the bytes for the same input,
-because `as_json()` honours jsonlite's `digits = 4` while yyjsonr writes
-shortest-round-trip. Both metrics are reported by `tools/bench/compare.R`.
+where the alternative emits close to twice the bytes for the same input:
+those runs were made at `digits = 4`, jsonlite's default, while yyjsonr
+writes shortest-round-trip. Both metrics are reported by
+`tools/bench/compare.R`.
 
 The changes, in descending order of what they were worth:
 
@@ -1039,7 +1051,9 @@ Every `toJSON()` argument is now implemented: `dataframe = "values"`,
 `complex = "list"` (including inside a data frame, in both row and column
 orientation), `always_decimal` and `pretty`.
 
-The one deliberate deviation is the `sf` default. jsonlite 2.0.0 defaults sf
+Two defaults deviate deliberately. `digits = Inf` writes numbers losslessly
+where jsonlite rounds to 4 decimal places (see "New features"). And the `sf`
+default: jsonlite 2.0.0 defaults sf
 objects to `sf = "dataframe"` (a record array); `as_json()` defaults to
 `sf = "geojson"`, because emitting a `FeatureCollection` for an sf object is
 the purpose of this package and what existing callers depend on. All three
@@ -1047,7 +1061,7 @@ modes are byte-identical to jsonlite when requested explicitly, and
 `options(fastgeojson.sf = "dataframe")` restores jsonlite's default globally.
 
 Parity is verified by jsonlite's own toJSON test suite, ported into
-`tests/testthat`: **907 expectations, no failures and no skips**.
+`tests/testthat`: **over 900 expectations, no failures and no skips**.
 
 # fastgeojson 0.2.2
 

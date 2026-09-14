@@ -387,10 +387,14 @@ pub(crate) const DIGITS_SHORTEST: u8 = u8::MAX;
 /// The shortest decimal that round-trips to exactly `v`.
 ///
 /// Whole numbers still print as integers, matching how every other numeric
-/// path in this crate renders them; ryu would write "1.0".
+/// path in this crate renders them; ryu would write "1.0". The shortcut
+/// covers every whole value below 1e16, where ryu switches to exponent form
+/// ("1e16") on its own: `v as i64` is exact up to 2^63, and the bound used to
+/// be 2^53, which left 2^53 itself and everything up to 1e16 printing as
+/// "9007199254740992.0".
 #[inline]
 pub(crate) fn write_shortest_f64(buf: &mut Vec<u8>, v: f64) {
-    if v.fract() == 0.0 && v.abs() < 9.007_199_254_740_992e15 {
+    if v.fract() == 0.0 && v.abs() < 1.0e16 {
         // `v as i64` is 0 for both zeros, and this mode's whole promise is
         // that the text reads back as the same double -- which -0.0 and 0.0
         // are not. ryu keeps the sign; this integral shortcut did not, so

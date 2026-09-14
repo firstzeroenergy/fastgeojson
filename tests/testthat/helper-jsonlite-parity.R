@@ -44,9 +44,12 @@ base64_dec      <- jsonlite::base64_dec
 # regression; implementing the feature makes the skip disappear on its own.
 # Messages must propagate untouched: keep_vec_names emits jsonlite's
 # deprecation message and the ported tests assert it with expect_message().
-toJSON <- function(...) {
+# as_json() writes numbers losslessly by default where toJSON() rounds to 4
+# decimal places. These files assert jsonlite's own expectations, so the
+# shim supplies jsonlite's default whenever a test does not name `digits`.
+toJSON <- function(..., digits = 4) {
   tryCatch(
-    unclass(fastgeojson::as_json(...)),
+    unclass(fastgeojson::as_json(..., digits = digits)),
     error = function(e) {
       msg <- conditionMessage(e)
       if (grepl("not yet implemented in fastgeojson", msg, fixed = TRUE)) {

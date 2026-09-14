@@ -3,10 +3,11 @@
 #
 #   Rscript tools/bench/compare.R [label]
 #
-# MB/s alone is misleading here: fastgeojson honours jsonlite's digits = 4
-# while yyjsonr writes shortest-round-trip, so on numeric data they emit
-# almost twice the bytes for the same input. That inflates their MB/s and
-# deflates ours for producing more compact output. Wall-clock time on the same
+# MB/s alone is misleading here when the runs use different precisions: at
+# digits = 4 (jsonlite's default) fastgeojson emits about half the bytes
+# yyjsonr's shortest-round-trip output has for the same numeric input, which
+# inflates their MB/s and deflates ours. At the default digits = Inf both
+# write the same bytes. Wall-clock time on the same
 # input is the metric that answers "which serializer is faster"; MB/s answers
 # "which moves bytes faster". Report both.
 

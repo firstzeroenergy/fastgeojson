@@ -11,6 +11,11 @@
 
 suppressMessages({library(fastgeojson); library(jsonlite); library(sf)})
 
+# Parity is asserted under equal arguments. as_json() defaults to lossless
+# numbers where toJSON() rounds to 4 decimal places, so supply jsonlite's
+# default whenever a call here does not name `digits`.
+as_json <- function(..., digits = 4) fastgeojson::as_json(..., digits = digits)
+
 fails <- 0L
 cmp <- function(x, label, ...) {
   want <- tryCatch(as.character(toJSON(x, sf = "geojson", ...)),

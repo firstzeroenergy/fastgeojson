@@ -17,7 +17,7 @@ as_json(
   null = c("list", "null"),
   na = c("null", "string"),
   auto_unbox = FALSE,
-  digits = 4,
+  digits = Inf,
   pretty = FALSE,
   force = FALSE,
   ...
@@ -27,7 +27,8 @@ as_json(
 \item{x}{The object to serialize.}
 
 \item{dataframe}{How to encode data frames: \code{"rows"} (default,
-\verb{[\{"a":1\},\{"a":2\}]}) or \code{"columns"} (\verb{\{"a":[1,2]\}}).}
+\verb{[\{"a":1\},\{"a":2\}]}), \code{"columns"} (\verb{\{"a":[1,2]\}}) or \code{"values"}
+(\verb{[[1],[2]]}, one array per row without names).}
 
 \item{matrix}{How to encode matrices: \code{"rowmajor"} (default) or
 \code{"columnmajor"}.}
@@ -56,9 +57,11 @@ frame output omits the key entirely, matching \code{toJSON()}.}
 \item{auto_unbox}{If \code{TRUE}, length-one atomic vectors become JSON scalars
 rather than length-one arrays. Defaults to \code{FALSE}.}
 
-\item{digits}{Number of decimal places for numeric values, or \code{NA} for the
-shortest round-trippable representation. Wrap in \code{\link[base:AsIs]{base::I()}} to interpret
-as \emph{significant} digits instead. Defaults to \code{4}, as in \code{toJSON()}.}
+\item{digits}{Precision of numeric values. The default, \code{Inf}, writes the
+shortest decimal that reads back as the same double, so nothing is lost.
+A number is a count of decimal places (\code{toJSON()}'s default is \code{4});
+wrap it in \code{\link[base:I]{base::I()}} to count \emph{significant} digits instead; \code{NA} is
+\code{toJSON()}'s 15 significant digits.}
 
 \item{pretty}{If \code{TRUE}, indent the output by two spaces; a number sets the
 indent width.}
@@ -78,8 +81,8 @@ makes R scan and hash every byte of the result to intern it in the
 CHARSXP cache, at roughly a nanosecond per byte, and on a large result
 that costs several times the serialization itself. Use it when the JSON
 is on its way out of R -- \code{writeBin()} to a file or connection, an HTTP
-response body, a socket. Writing a 17.7 MB result to a file takes 15 ms
-through \code{writeBin()} against 117 ms through \code{writeLines()} on the
+response body, a socket. Writing an 18 MB result to a file takes 9 ms
+through \code{writeBin()} against 101 ms through \code{writeLines()} on the
 character result.
 
 It is not a route to a string: \code{rawToChar()} pays the interning cost
@@ -95,8 +98,11 @@ returns an unclassed raw vector holding the same bytes.
 }
 \description{
 \code{as_json()} is a high-performance, drop-in replacement for
-\code{\link[jsonlite:fromJSON]{jsonlite::toJSON()}}. It takes the same arguments, in the same order, with
-the same defaults, and is intended to produce byte-identical output. The
+\code{\link[jsonlite:toJSON]{jsonlite::toJSON()}}. It takes the same arguments, in the same order, and
+produces byte-identical output under the same arguments. Two defaults
+differ deliberately: numbers are written losslessly (\code{digits = Inf}, where
+\code{toJSON()} rounds to 4 decimal places) and \code{sf} objects become GeoJSON
+(\code{sf = "geojson"}, where \code{toJSON()} writes a record array). The
 encoders are implemented in Rust via \strong{extendr} and parallelised with
 \code{rayon}, and \code{sf} objects gain a dedicated GeoJSON path.
 }
@@ -118,11 +124,13 @@ recursively.
 
 \strong{Type mapping.}
 \itemize{
-\item \strong{Numeric:} JSON numbers, rounded to \code{digits} decimal places.
+\item \strong{Numeric:} JSON numbers, exact by default; see \code{digits}.
 \code{NA}, \code{NaN}, \code{Inf} and \code{-Inf} follow the \code{na} argument.
 \item \strong{Logical:} \code{true} / \code{false}.
-\item \strong{Character:} JSON strings. Output is always valid UTF-8;
-latin1- and native-encoded inputs are translated.
+\item \strong{Character:} JSON strings. latin1- and native-encoded
+inputs are translated to UTF-8; bytes that are not valid UTF-8 pass
+through unchanged, as \code{toJSON()} passes them, and a \code{"bytes"}-marked
+string raises the error \code{toJSON()} raises.
 \item \strong{Factor:} labels, or integer codes when \code{factor = "integer"}.
 \item \strong{Date / POSIXt:} controlled by \code{Date} and \code{POSIXt}.
 \item \strong{complex / raw:} controlled by \code{complex} and \code{raw}.

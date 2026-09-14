@@ -848,6 +848,16 @@ mod tests {
         assert_eq!(short(0.0), "0");
         assert_eq!(short(1e15), "1000000000000000");
         assert_eq!(short(0.1), "0.1");
+        // Every whole double below 1e16 prints as plain digits, including the
+        // ones at and past 2^53, which the old 2^53 bound sent to ryu's "d.0".
+        // From 1e16 ryu's own exponent form is the shorter text.
+        assert_eq!(short(9007199254740991.0), "9007199254740991");
+        assert_eq!(short(9007199254740992.0), "9007199254740992");
+        assert_eq!(short(-9007199254740992.0), "-9007199254740992");
+        assert_eq!(short(9007199254740994.0), "9007199254740994");
+        assert_eq!(short(9999999999999998.0), "9999999999999998");
+        assert_eq!(short(1e16), "1e16");
+        assert_eq!(short(1e17), "1e17");
         // -0.0 and 0.0 are different doubles, and this mode promises the text
         // reads back as the same one. The integral shortcut used to drop the
         // sign; the random sample never reaches it, because a uniform mantissa

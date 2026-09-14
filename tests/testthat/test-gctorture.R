@@ -38,7 +38,15 @@ posixt_frame <- function(n = 200L, ncol = 2L, tz = "UTC") {
   d
 }
 
+# The JIT is switched off for the duration. When the package is not
+# byte-compiled -- devtools::test(), or an install with --no-byte-compile --
+# R's JIT compiles the helpers as_json() calls, and the compiler makes about
+# 300,000 allocations per call; under gctorture each one is a full collection,
+# which turned a sub-second file into an hour. The collections these tests
+# need come from the package's own allocations, which the JIT adds nothing to.
 with_gctorture <- function(expr) {
+  jit <- compiler::enableJIT(0L)
+  on.exit(compiler::enableJIT(jit), add = TRUE)
   gctorture(TRUE)
   on.exit(gctorture(FALSE), add = TRUE)
   force(expr)

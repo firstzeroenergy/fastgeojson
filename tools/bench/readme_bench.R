@@ -63,9 +63,9 @@ df <- data.frame(
   stringsAsFactors = FALSE
 )
 
-cat("### JSON: 1,000,000 rows x 4 mixed columns (all defaults)\n")
+cat("### JSON: 1,000,000 rows x 4 mixed columns (lossless; jsonlite at digits = I(17))\n")
 res <- timed("fastgeojson", function() as_json(df))
-res <- rbind(res, timed("jsonlite", function() toJSON(df)))
+res <- rbind(res, timed("jsonlite", function() toJSON(df, digits = I(17))))
 if (ok_yy)  res <- rbind(res, timed("yyjsonr", function() yyjsonr::write_json_str(df)))
 if (ok_jfy) res <- rbind(res, timed("jsonify", function() jsonify::to_json(df)))
 show(res, "jsonlite"); flush(stdout())
@@ -88,7 +88,7 @@ pts <- st_as_sf(
   coords = c("lon", "lat"), crs = 4326
 )
 
-cat("\n### GeoJSON: 1,000,000 point features (all defaults)\n")
+cat("\n### GeoJSON: 1,000,000 point features (lossless, all defaults)\n")
 res <- timed("fastgeojson", function() as_json(pts))
 if (ok_gjs) res <- rbind(res, timed("geojsonsf", function() geojsonsf::sf_geojson(pts)))
 if (ok_yy)  res <- rbind(res, timed("yyjsonr", function() yyjsonr::write_geojson_str(pts)))
@@ -112,7 +112,7 @@ collect("points_1m",
                   pts_res$mb[pts_res$pkg == "fastgeojson"] * 1048576)),
         "geojsonsf")
 
-cat("\n### 10,000 polygons x 200 vertices (all defaults)\n")
+cat("\n### 10,000 polygons x 200 vertices (lossless, all defaults)\n")
 set.seed(7)
 polys <- lapply(1:10000, function(i) {
   cx <- runif(1, -120, -70); cy <- runif(1, 30, 45)
@@ -125,7 +125,17 @@ res <- timed("fastgeojson", function() as_json(pl))
 if (ok_gjs) res <- rbind(res, timed("geojsonsf", function() geojsonsf::sf_geojson(pl)))
 if (ok_yy)  res <- rbind(res, timed("yyjsonr", function() yyjsonr::write_geojson_str(pl)))
 show(res, "geojsonsf"); flush(stdout())
-collect("polygons_10k", res, "geojsonsf")
+pl_res <- res
+
+cat("\n  single-threaded:\n")
+fastgeojson_threads(1)
+st <- tm(function() as_json(pl))
+cat(sprintf("  %-14s %9.1f ms\n", "fastgeojson", st * 1000))
+fastgeojson_threads(0)
+collect("polygons_10k",
+        rbind(pl_res, row("fastgeojson (1 thread)", st,
+                          pl_res$mb[pl_res$pkg == "fastgeojson"] * 1048576)),
+        "geojsonsf")
 
 out <- do.call(rbind, collected)
 out <- data.frame(table = out$table, package = out$pkg,

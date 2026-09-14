@@ -6,60 +6,61 @@
 
 `fastgeojson` converts `sf` objects to GeoJSON FeatureCollections and generic R objects (`data.frame`, lists, vectors) to JSON strings.
 
-Implemented in Rust via **extendr**, it delivers **13–17× speedups** over existing R solutions on large datasets, with output byte-for-byte identical to `jsonlite::toJSON()`.
+Implemented in Rust via **extendr**, it delivers **6–27× speedups** over `jsonlite` and `geojsonsf` on large datasets at equal output, and 2.7–3.2× over `yyjsonr`, with output byte-for-byte identical to `jsonlite::toJSON()` under the same arguments.
 
 Results are ready for Shiny, Plumber, `leaflet::addGeoJSON()`, and any package that talks to JavaScript.
 
-> **Status: v0.3.0** — `as_json()` takes `jsonlite::toJSON()`'s arguments, in the same order, with the same defaults. See [Upgrading](#upgrading-from-02x).
+> **Status: v0.3.0** — `as_json()` takes `jsonlite::toJSON()`'s arguments, in the same order. Two defaults differ, both deliberately: numbers are lossless, and `sf` objects become GeoJSON. See [Upgrading](#upgrading-from-01x-or-02x).
 
 ## Performance
 
-Fastest of 7 runs, **default arguments for every package**. Reproduce with `Rscript tools/bench/readme_bench.R`.
+Fastest of 7 runs, **every package writing lossless numbers**: `jsonlite` at `digits = I(17)`, its only exact setting; the others at their defaults, which already are. The outputs are the same JSON — `yyjsonr`'s is byte-identical to ours, `jsonify` and `geojsonsf` write 17 digits for the few values whose shortest form is 16, and our FeatureCollections carry the `name` member GDAL writes. Reproduce with `Rscript tools/bench/readme_bench.R`.
 
 ### 1 million rows × 4 mixed columns
 
 |Package                | Time_ms| Output_MB|Speedup vs jsonlite |
 |:----------------------|-------:|---------:|:-------------------|
-|jsonify                |    1361|      61.1|0.7×                |
-|jsonlite               |    1014|      49.4|—                   |
-|yyjsonr                |     233|      61.1|4.4×                |
-|fastgeojson (1 thread) |     152|      49.4|6.7×                |
-|fastgeojson            |      59|      49.4|17.2×               |
+|jsonlite               |    1965|      61.6|—                   |
+|jsonify                |    1297|      61.1|1.5×                |
+|yyjsonr                |     228|      61.1|8.6×                |
+|fastgeojson (1 thread) |     206|      61.1|9.5×                |
+|fastgeojson            |      72|      61.1|27.3×               |
 
 ### 1 million point features
 
 |Package                | Time_ms| Output_MB|Speedup vs geojsonsf |
 |:----------------------|-------:|---------:|:--------------------|
-|geojsonsf              |    2076|     150.8|—                    |
-|yyjsonr                |     578|     150.8|3.6×                 |
-|fastgeojson (1 thread) |     327|     119.8|6.3×                 |
-|fastgeojson            |     144|     119.8|14.4×                |
+|geojsonsf              |    1848|     150.8|—                    |
+|yyjsonr                |     571|     150.8|3.2×                 |
+|fastgeojson (1 thread) |     460|     150.8|4.0×                 |
+|fastgeojson            |     176|     150.8|10.5×                |
 
 ### 10,000 polygons × 200 vertices
 
-|Package     | Time_ms| Output_MB|Speedup vs geojsonsf |
-|:-----------|-------:|---------:|:--------------------|
-|geojsonsf   |     605|      76.4|—                    |
-|yyjsonr     |     245|      76.4|2.5×                 |
-|fastgeojson |      45|      37.6|13.4×                |
+|Package                | Time_ms| Output_MB|Speedup vs geojsonsf |
+|:----------------------|-------:|---------:|:--------------------|
+|geojsonsf              |     553|      76.4|—                    |
+|fastgeojson (1 thread) |     288|      76.4|1.9×                 |
+|yyjsonr                |     244|      76.4|2.3×                 |
+|fastgeojson            |      90|      76.4|6.1×                 |
 
-Output size is shown because packages that write shortest-round-trip numbers emit larger payloads for the same input; `fastgeojson` matches `jsonlite` exactly.
+Output size is shown so that a difference in bytes is visible rather than assumed. At its default of 4 decimal places `jsonlite` takes 1.1 s on this table instead of 2.0 s and writes 20% fewer bytes; `as_json(x, digits = 4)` reproduces those bytes exactly. Single-threaded, `fastgeojson` and `yyjsonr` are level — both sit close to the floor described below — and the margin between them is the parallel serializer.
 
 Most of what is left in those figures is not serialization. The same calls with `as_bytes = TRUE`, which returns the bytes without interning them as an R string, separate the two:
 
 | | full call | `as_bytes = TRUE` | R's share |
 |---|---|---|---|
-| 1M rows × 4 columns | 54.0 ms | 11.9 ms | 78% |
-| 1M point features | 123.6 ms | 15.6 ms | 87% |
-| 10k polygons × 200 vertices | 44.7 ms | 7.0 ms | 84% |
+| 1M rows × 4 columns | 72.6 ms | 12.1 ms | 83% |
+| 1M point features | 179.6 ms | 26.3 ms | 85% |
+| 10k polygons × 200 vertices | 92.5 ms | 11.9 ms | 87% |
 
 R charges about a nanosecond per byte to build a character vector, because it scans and hashes every byte to intern it in the CHARSXP cache. No serializer can go under that: *R Internals* requires every CHARSXP to be made through `mkCharLenCE`. See [`as_bytes`](#as_bytes) for when you can skip it entirely.
 
 ## Correctness
 
-jsonlite's own `toJSON` test suite runs against `as_json()` — the test files from jsonlite 2.0.0 live in `tests/testthat/` with `toJSON()` bound to `as_json()`. **907 expectations pass, no failures, no skips**, including jsonlite's `sf` tests, which validate against GDAL's GeoJSON writer.
+jsonlite's own `toJSON` test suite runs against `as_json()` — the test files from jsonlite 2.0.0 live in `tests/testthat/` with `toJSON()` bound to `as_json()`. **over 900 expectations pass, no failures, no skips** (the exact count varies with the platform locale), including jsonlite's `sf` tests, which validate against GDAL's GeoJSON writer.
 
-One deliberate difference: `jsonlite` 2.0.0 defaults `sf` objects to a record array. `as_json()` defaults to a `FeatureCollection`.
+Two deliberate differences in defaults. `jsonlite` rounds numbers to 4 decimal places; `as_json()` writes the shortest decimal that reads back as the same double, so `pi` is `3.141592653589793` and a map projection's `0.000151481324748` is not `0.0002`. Pass `digits = 4` for `toJSON()`'s output. And `jsonlite` 2.0.0 defaults `sf` objects to a record array; `as_json()` defaults to a `FeatureCollection`.
 
 ```r
 as_json(nc)                      # FeatureCollection  (default here)
@@ -69,22 +70,24 @@ as_json(nc, sf = "dataframe")    # record array       (jsonlite default)
 options(fastgeojson.sf = "dataframe")   # or switch the default globally
 ```
 
-## Upgrading from 0.2.x
+## Upgrading from 0.1.x or 0.2.x
+
+`sf_geojson_str()` and `df_json_str()` — the whole API of 0.1.x — are gone; `as_json()` does both and dispatches on its input. Replace either with `as_json(x, ...)`.
 
 Arguments are positional in jsonlite's order, so `as_json(df, "columns")` now means `dataframe = "columns"`. Named arguments are unaffected.
 
-Four defaults now match `toJSON()`, so output can differ from 0.2.x:
+Output at the defaults changes where 0.2.2 differed from `toJSON()` — measured by serializing the same inputs with both versions:
 
-| Argument | 0.2.x | 0.3.0 |
+| | 0.2.2 | 0.3.0 |
 | :--- | :--- | :--- |
-| `digits` | `NULL` | `4` — pass `digits = NA` for full precision |
-| `keep_vec_names` | `TRUE` | `FALSE` — named vectors become arrays |
-| `json_verbatim` | `TRUE` | `FALSE` |
-| `UTC` | `TRUE` | `FALSE` — timestamps keep their own time zone |
+| missing value in a row-oriented frame | `"d":null` | key omitted; `na = "null"` keeps it |
+| bare numeric `NA`, `NaN`, `Inf` | `null` | `"NA"`, `"NaN"`, `"Inf"`; `na = "null"` keeps `null` |
+| matrix | flattened, `[1,2,3,4]` | nested by row, `[[1,3],[2,4]]` |
+| control character in a string | `\u000A` | `\n` |
+| FeatureCollection | no `name` | `"name":"sfdata"`, as GDAL writes it |
+| whole coordinate | `3.0` | `3` |
 
-`Date` and `POSIXt` follow `jsonlite`: `POSIXt = "string"` uses `format()`, `"ISO8601"` emits `"2013-06-17T22:33:44"`, and `Date = "epoch"` returns days. Full list in `NEWS.md`.
-
-`sf_geojson_str()` and `df_json_str()` are gone; `as_json()` does both and dispatches on its input. Replace either with `as_json(x, ...)`.
+Numbers are otherwise unchanged: 0.2.2 had no `digits` argument and always wrote them losslessly, which is now the default `digits = Inf`. Named vectors, `"json"`-class strings and time zones behave as before — the `keep_vec_names`, `json_verbatim` and `UTC` arguments are new, and their defaults reproduce 0.2.2. So are `Date` and `POSIXt`, which follow `jsonlite`: `POSIXt = "string"` uses `format()`, `"ISO8601"` emits `"2013-06-17T22:33:44"`, and `Date = "epoch"` returns days. Full list in `NEWS.md`.
 
 ## Installation
 
@@ -121,7 +124,7 @@ as_json(
   null      = c("list", "null"),
   na        = c("null", "string"),
   auto_unbox = FALSE,
-  digits     = 4,
+  digits     = Inf,
   pretty     = FALSE,
   force      = FALSE,
   ...
@@ -133,17 +136,17 @@ as_json(
 Two options go beyond `toJSON()`:
 
 ```r
-as_json(x, digits = Inf)      # shortest decimal that round-trips exactly
+as_json(x, digits = Inf)      # the default: shortest decimal that round-trips exactly
 as_json(x, as_bytes = TRUE)   # a raw vector instead of a character vector
 ```
 
-`digits = Inf` is the only lossless setting; `digits = NA` matches `toJSON()`, which keeps 15 significant digits, so `pi` becomes `3.14159265358979`.
+`digits = Inf` is the only lossless setting. A number is decimal places, as in `toJSON()`, whose default `4` turns `pi` into `3.1416`; `I(n)` is significant digits; `NA` is `toJSON()`'s 15 significant digits, `3.14159265358979`.
 
 `fastgeojson_threads(n)` sets the worker count: `1` disables parallelism, `0` restores automatic. The default is the whole machine, honouring `FASTGEOJSON_NUM_THREADS`, `RAYON_NUM_THREADS`, `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. Output is identical at any thread count.
 
 ### as_bytes
 
-Returns the same bytes as a raw vector instead of a character vector, skipping the interning that is 78–87% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
+Returns the same bytes as a raw vector instead of a character vector, skipping the interning that is 83–87% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
 
 ```r
 con <- file("out.json", "wb")                          # a file
@@ -154,7 +157,7 @@ httr2::req_body_raw(req, as_json(x, as_bytes = TRUE), "application/json")
 writeBin(as_json(x, as_bytes = TRUE), gzfile("out.json.gz", "wb"))
 ```
 
-Writing a 17.7 MB result to a file takes 15 ms this way, against 117 ms through `writeLines()` on the character result and 488 ms through `jsonlite`. The character route pays the interning and then walks the string again.
+Writing an 18 MB result to a file takes 9 ms this way, against 101 ms through `writeLines()` on the character result; `jsonlite::write_json()` takes 415 ms end to end. The character route pays the interning and then walks the string again.
 
 Below about a megabyte of output it is not worth thinking about. It is not a route to a string, since `rawToChar()` pays the cost straight back, and `pretty` needs a string to indent, so that combination is an error rather than a silent fallback.
 
