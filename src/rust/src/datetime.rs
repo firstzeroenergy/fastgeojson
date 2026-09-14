@@ -394,25 +394,80 @@ pub(crate) const DIGITS_SHORTEST: u8 = u8::MAX;
 /// "9007199254740992.0".
 #[inline]
 pub(crate) fn write_shortest_f64(buf: &mut Vec<u8>, v: f64) {
+    buf.reserve(SHORTEST_MAX);
+    let len = buf.len();
+    unsafe {
+        let written = write_shortest_raw(buf.as_mut_ptr().add(len), v);
+        buf.set_len(len + written);
+    }
+}
+
+/// The most bytes `write_shortest_raw` writes: ryu's 24, itoa's 20 plus a
+/// sign for the integral path.
+pub(crate) const SHORTEST_MAX: usize = 24;
+
+/// `write_shortest_f64` into raw storage, for loops that have reserved for
+/// a whole row and write through a pointer rather than pushing byte by byte.
+///
+/// # Safety
+///
+/// `dst` must be writable for `SHORTEST_MAX` bytes.
+#[inline]
+pub(crate) unsafe fn write_shortest_raw(dst: *mut u8, v: f64) -> usize {
     if v.fract() == 0.0 && v.abs() < 1.0e16 {
         // `v as i64` is 0 for both zeros, and this mode's whole promise is
         // that the text reads back as the same double -- which -0.0 and 0.0
         // are not. ryu keeps the sign; this integral shortcut did not, so
         // as_json(-0.0, digits = Inf) came back as 0.
+        let mut n = 0;
         if v == 0.0 && v.is_sign_negative() {
-            buf.push(b'-');
+            *dst = b'-';
+            n = 1;
         }
         let mut tmp = itoa::Buffer::new();
-        buf.extend_from_slice(tmp.format(v as i64).as_bytes());
-        return;
+        let s = tmp.format(v as i64).as_bytes();
+        std::ptr::copy_nonoverlapping(s.as_ptr(), dst.add(n), s.len());
+        return n + s.len();
     }
-    buf.reserve(24);
-    let len = buf.len();
-    unsafe {
-        let ptr = buf.as_mut_ptr().add(len);
-        let written = ryu::raw::format64(v, ptr);
-        buf.set_len(len + written);
+    shortest_layout(v, dst)
+}
+
+/// The shortest decimal that reads back as `v`, laid out as `ryu` lays it
+/// out, with the digits from Żmij (Victor Zverovich's algorithm, David
+/// Tolnay's Rust port). Żmij's own layout is ryu's to the byte except that it
+/// writes the exponent sign in both directions, `1e+16` for ryu's `1e16`;
+/// the `+` is dropped here. Verified byte for byte against ryu in the tests
+/// below, over millions of doubles. Digits alone: 24.8 ns per double for ryu
+/// against 20.4 on the polygon benchmark's coordinates, and 35 against 21.5
+/// on full-range random doubles.
+///
+/// # Safety
+///
+/// `dst` must be writable for 24 bytes; `v` must be finite.
+///
+/// Kept out of line: inlined, a large body sat in every loop that also has
+/// the whole-number shortcut above it, and the whole-number column shape
+/// slowed by 7% without ever calling this.
+#[inline(never)]
+pub(crate) unsafe fn shortest_layout(v: f64, dst: *mut u8) -> usize {
+    let mut b = zmij::Buffer::new();
+    let s = b.format_finite(v).as_bytes();
+    let n = s.len();
+    // The exponent form, the only one with a sign to drop, appears exactly
+    // when the magnitude is outside [1e-5, 1e16); everything inside copies
+    // straight through with no scan.
+    let a = v.abs();
+    if a >= 1e16 || a < 1e-5 {
+        if let Some(e) = s.iter().position(|&c| c == b'e') {
+            if e + 1 < n && s[e + 1] == b'+' {
+                std::ptr::copy_nonoverlapping(s.as_ptr(), dst, e + 1);
+                std::ptr::copy_nonoverlapping(s.as_ptr().add(e + 2), dst.add(e + 1), n - e - 2);
+                return n - 1;
+            }
+        }
     }
+    std::ptr::copy_nonoverlapping(s.as_ptr(), dst, n);
+    n
 }
 
 /// "00010203...9899": the two decimal digits of every value below 100, so a

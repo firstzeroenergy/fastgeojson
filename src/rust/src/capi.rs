@@ -10,27 +10,6 @@ use std::os::raw::c_void;
 // C-API HELPERS
 // ------------------------------------------------------------------
 
-/// One attribute, read by walking the pairlist directly.
-///
-/// `Rf_getAttrib` is a cross-DLL call that also sets NOT_MUTABLE on whatever
-/// it returns, which is a write to a shared SEXP header and so cannot be done
-/// from a worker. This is three pure pointer reads per link and touches
-/// nothing, which is what makes the geometry pass movable off the R thread.
-#[inline]
-pub(crate) unsafe fn attrib_by_tag(
-    x: libR_sys::SEXP,
-    tag: libR_sys::SEXP,
-) -> libR_sys::SEXP {
-    let mut a = ATTRIB(x);
-    while a != libR_sys::R_NilValue {
-        if libR_sys::TAG(a) == tag {
-            return libR_sys::CAR(a);
-        }
-        a = libR_sys::CDR(a);
-    }
-    libR_sys::R_NilValue
-}
-
 /// Element pointer for a list, or `None` if `x` is not one.
 ///
 /// The type check is a header read, so this cannot raise the R error
@@ -241,9 +220,23 @@ pub(crate) fn interrupted_msg() -> String {
 /// is one memcpy at memory bandwidth.
 ///
 /// No UTF-8 validation, because a raw vector carries no encoding.
+/// Hands `buf` back as an R raw vector.
+///
+/// Copies with `simd_copy` rather than letting extendr's `Raw::from_bytes`
+/// run the C runtime's `memcpy`, which takes its slow path whenever source
+/// and destination differ modulo 4 KB -- and they always do here, R placing
+/// a large vector's bytes 48 into a page and the allocator placing ours at
+/// 0. See `simd_copy`.
 pub(crate) fn finish_json_raw(buf: Vec<u8>) -> PResult<Robj> {
     check_str_state()?;
-    Ok(Raw::from_bytes(&buf).into())
+    let len = buf.len();
+    unsafe {
+        let out = libR_sys::Rf_allocVector(libR_sys::SEXPTYPE::RAWSXP, len as libR_sys::R_xlen_t);
+        libR_sys::Rf_protect(out);
+        crate::exports::simd_copy(libR_sys::RAW(out), buf.as_ptr(), len);
+        libR_sys::Rf_unprotect(1);
+        Ok(Robj::from_sexp(out))
+    }
 }
 
 /// Hands `buf` back as an R character vector of length one.

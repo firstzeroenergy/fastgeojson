@@ -1,14 +1,14 @@
 table,package,median_ms,output_mb,ref
-json_1m,jsonlite,1965,61.6,TRUE
-json_1m,jsonify,1297,61.1,FALSE
-json_1m,yyjsonr,228,61.1,FALSE
-json_1m,fastgeojson (1 thread),206,61.1,FALSE
-json_1m,fastgeojson,72,61.1,FALSE
-points_1m,geojsonsf,1848,150.8,TRUE
-points_1m,yyjsonr,571,150.8,FALSE
-points_1m,fastgeojson (1 thread),460,150.8,FALSE
+json_1m,jsonlite,1945,61.6,TRUE
+json_1m,jsonify,1293,61.1,FALSE
+json_1m,yyjsonr,233,61.1,FALSE
+json_1m,fastgeojson (1 thread),148,61.1,FALSE
+json_1m,fastgeojson,73,61.1,FALSE
+points_1m,geojsonsf,1858,150.8,TRUE
+points_1m,yyjsonr,573,150.8,FALSE
+points_1m,fastgeojson (1 thread),327,150.8,FALSE
 points_1m,fastgeojson,176,150.8,FALSE
-polygons_10k,geojsonsf,553,76.4,TRUE
-polygons_10k,fastgeojson (1 thread),288,76.4,FALSE
-polygons_10k,yyjsonr,244,76.4,FALSE
-polygons_10k,fastgeojson,90,76.4,FALSE
+polygons_10k,geojsonsf,597,76.4,TRUE
+polygons_10k,yyjsonr,245,76.4,FALSE
+polygons_10k,fastgeojson (1 thread),196,76.4,FALSE
+polygons_10k,fastgeojson,92,76.4,FALSE

@@ -8,7 +8,6 @@
 //! `PhaseTimer` in `exports`.
 
 use extendr_api::prelude::*;
-use extendr_api::wrapper::Raw;
 use extendr_ffi as libR_sys;
 use rayon::prelude::*;
 use std::ffi::{c_char, CStr};

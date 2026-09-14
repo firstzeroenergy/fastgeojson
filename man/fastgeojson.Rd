@@ -74,22 +74,10 @@ error. \code{sf} objects are exempt so geometry handling is preserved.}
 \code{json_verbatim}, \code{UTC}, \code{time_format}, \code{always_decimal}, \code{use_signif},
 \code{indent}, \code{sf} and \code{as_bytes}.
 
-\code{as_bytes = TRUE} is the one that is not a \code{toJSON()} argument. It
-returns the same bytes as a \strong{raw vector} instead of a character
-vector, which skips R's string interning: building a character vector
-makes R scan and hash every byte of the result to intern it in the
-CHARSXP cache, at roughly a nanosecond per byte, and on a large result
-that costs several times the serialization itself. Use it when the JSON
-is on its way out of R -- \code{writeBin()} to a file or connection, an HTTP
-response body, a socket. Writing an 18 MB result to a file takes 9 ms
-through \code{writeBin()} against 101 ms through \code{writeLines()} on the
-character result.
-
-It is not a route to a string: \code{rawToChar()} pays the interning cost
-back, and then some. It cannot be combined with \code{pretty}, which needs a
-string to indent, and that combination is an error rather than a silent
-fallback. The bytes are identical to the character result in every other
-respect.}
+\code{as_bytes = TRUE}, which is not a \code{toJSON()} argument, returns the same
+bytes as a \strong{raw vector}, skipping R's string interning -- most of a
+large call. Use it when the JSON is leaving R: \code{writeBin()} to a file or
+connection, an HTTP response body. It cannot be combined with \code{pretty}.}
 }
 \value{
 A length-one character vector of class \code{"json"}, or

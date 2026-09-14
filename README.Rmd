@@ -1,5 +1,7 @@
 ---
-output: github_document
+output:
+  github_document:
+    html_preview: false
 ---
 
 ```{r setup, include=FALSE}
@@ -44,7 +46,7 @@ Results are ready for Shiny, Plumber, `leaflet::addGeoJSON()`, and any package t
 
 ## Performance
 
-Fastest of 7 runs, **every package writing lossless numbers**: `jsonlite` at `digits = I(17)`, its only exact setting; the others at their defaults, which already are. The outputs are the same JSON — `yyjsonr`'s is byte-identical to ours, `jsonify` and `geojsonsf` write 17 digits for the few values whose shortest form is 16, and our FeatureCollections carry the `name` member GDAL writes. Reproduce with `Rscript tools/bench/readme_bench.R`.
+Fastest of 7 runs, every package writing lossless numbers (`jsonlite` at `digits = I(17)`, the others at their defaults) and the same JSON. Reproduce with `Rscript tools/bench/readme_bench.R`.
 
 ### 1 million rows × 4 mixed columns
 
@@ -64,23 +66,21 @@ bench_table("points_1m")
 bench_table("polygons_10k")
 ```
 
-Output size is shown so that a difference in bytes is visible rather than assumed. At its default of 4 decimal places `jsonlite` takes 1.1 s on this table instead of 2.0 s and writes 20% fewer bytes; `as_json(x, digits = 4)` reproduces those bytes exactly. Single-threaded, `fastgeojson` and `yyjsonr` are level — both sit close to the floor described below — and the margin between them is the parallel serializer.
+`jsonlite`'s own default rounds to 4 decimal places, which is faster for it (1.1 s here) and 20% smaller; `as_json(x, digits = 4)` reproduces that output. Single-threaded, `fastgeojson` is 1.25–1.8× faster than `yyjsonr`.
 
-Most of what is left in those figures is not serialization. The same calls with `as_bytes = TRUE`, which returns the bytes without interning them as an R string, separate the two:
+Most of each call is R interning the result as a string, at about a nanosecond per byte. `as_bytes = TRUE` returns the bytes without it:
 
 | | full call | `as_bytes = TRUE` | R's share |
 |---|---|---|---|
-| 1M rows × 4 columns | 72.6 ms | 12.1 ms | 83% |
-| 1M point features | 179.6 ms | 26.3 ms | 85% |
-| 10k polygons × 200 vertices | 92.5 ms | 11.9 ms | 87% |
-
-R charges about a nanosecond per byte to build a character vector, because it scans and hashes every byte to intern it in the CHARSXP cache. No serializer can go under that: *R Internals* requires every CHARSXP to be made through `mkCharLenCE`. See [`as_bytes`](#as_bytes) for when you can skip it entirely.
+| 1M rows × 4 columns | 72.1 ms | 11.7 ms | 84% |
+| 1M point features | 176.8 ms | 22.3 ms | 87% |
+| 10k polygons × 200 vertices | 91.5 ms | 13.3 ms | 85% |
 
 ## Correctness
 
-jsonlite's own `toJSON` test suite runs against `as_json()` — the test files from jsonlite 2.0.0 live in `tests/testthat/` with `toJSON()` bound to `as_json()`. **over 900 expectations pass, no failures, no skips** (the exact count varies with the platform locale), including jsonlite's `sf` tests, which validate against GDAL's GeoJSON writer.
+jsonlite's own `toJSON` test suite (jsonlite 2.0.0, in `tests/testthat/` with `toJSON()` bound to `as_json()`) passes with no failures and no skips, including its `sf` tests against GDAL's GeoJSON writer.
 
-Two deliberate differences in defaults. `jsonlite` rounds numbers to 4 decimal places; `as_json()` writes the shortest decimal that reads back as the same double, so `pi` is `3.141592653589793` and a map projection's `0.000151481324748` is not `0.0002`. Pass `digits = 4` for `toJSON()`'s output. And `jsonlite` 2.0.0 defaults `sf` objects to a record array; `as_json()` defaults to a `FeatureCollection`.
+Two defaults differ. `jsonlite` rounds numbers to 4 decimal places; `as_json()` writes the shortest decimal that reads back as the same double (`digits = 4` gives `toJSON()`'s output). And `jsonlite` writes `sf` objects as a record array; `as_json()` writes a `FeatureCollection`.
 
 ```r
 as_json(nc)                      # FeatureCollection  (default here)
@@ -160,13 +160,13 @@ as_json(x, digits = Inf)      # the default: shortest decimal that round-trips e
 as_json(x, as_bytes = TRUE)   # a raw vector instead of a character vector
 ```
 
-`digits = Inf` is the only lossless setting. A number is decimal places, as in `toJSON()`, whose default `4` turns `pi` into `3.1416`; `I(n)` is significant digits; `NA` is `toJSON()`'s 15 significant digits, `3.14159265358979`.
+`digits`: `Inf` (the default) is lossless; a number is decimal places, as in `toJSON()`; `I(n)` is significant digits; `NA` is `toJSON()`'s 15 significant digits.
 
-`fastgeojson_threads(n)` sets the worker count: `1` disables parallelism, `0` restores automatic. The default is the whole machine, honouring `FASTGEOJSON_NUM_THREADS`, `RAYON_NUM_THREADS`, `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. Output is identical at any thread count.
+`fastgeojson_threads(n)` sets the worker count (`1` disables parallelism, `0` restores automatic); the default is the whole machine, honouring `FASTGEOJSON_NUM_THREADS`, `RAYON_NUM_THREADS`, `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. Output is identical at any thread count.
 
 ### as_bytes
 
-Returns the same bytes as a raw vector instead of a character vector, skipping the interning that is 83–87% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
+Returns the same bytes as a raw vector, skipping the interning that is 84–87% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
 
 ```r
 con <- file("out.json", "wb")                          # a file
@@ -177,11 +177,9 @@ httr2::req_body_raw(req, as_json(x, as_bytes = TRUE), "application/json")
 writeBin(as_json(x, as_bytes = TRUE), gzfile("out.json.gz", "wb"))
 ```
 
-Writing an 18 MB result to a file takes 9 ms this way, against 101 ms through `writeLines()` on the character result; `jsonlite::write_json()` takes 415 ms end to end. The character route pays the interning and then walks the string again.
+Writing an 18 MB result to a file takes 9 ms this way, against 101 ms through `writeLines()` on the character result and 415 ms through `jsonlite::write_json()`. It cannot be combined with `pretty`.
 
-Below about a megabyte of output it is not worth thinking about. It is not a route to a string, since `rawToChar()` pays the cost straight back, and `pretty` needs a string to indent, so that combination is an error rather than a silent fallback.
-
-For **htmlwidgets — `leaflet::addGeoJSON()`, `deckgl`, `mapdeck` — use the default.** Its `"json"` class is what makes htmlwidgets splice the text into the widget payload verbatim; a raw vector is base64-encoded instead, which the browser cannot use and which is 37% larger. `as_bytes` fits the other pattern, where the map fetches the GeoJSON from a URL rather than carrying it inline.
+For htmlwidgets (`leaflet::addGeoJSON()`, `deckgl`, `mapdeck`) use the default: they splice a `"json"`-classed string into the payload verbatim, but base64-encode a raw vector.
 
 ## Usage
 
@@ -240,24 +238,22 @@ observe({
 
 ## Supported types
 
-- **Geometries:** POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON, GEOMETRYCOLLECTION, in XY, XYZ, XYM and XYZM. Any `sfc` is encoded as geometry wherever it appears.
+- **Geometries:** POINT, MULTIPOINT, LINESTRING, MULTILINESTRING, POLYGON, MULTIPOLYGON, GEOMETRYCOLLECTION, in XY, XYZ, XYM and XYZM.
 - **Vectors:** integer, double, logical, character, factor, complex, raw.
 - **Structures:** list columns, nested lists, matrices, arrays, nested data frames, tibbles.
-- **Time:** `Date`, `POSIXt`, `bit64::integer64` (exact digits, as `toJSON()` emits them). `difftime` is written as its numeric value, which `toJSON()` only does under `force = TRUE`.
-- **Encodings:** latin1 and native inputs are translated to UTF-8 and escaping matches `jsonlite` byte for byte. Bytes that are not valid UTF-8 pass through unchanged, exactly as `toJSON()` passes them; a `"bytes"`-marked string raises the same error `toJSON()` raises.
+- **Time:** `Date`, `POSIXt`, `bit64::integer64`; `difftime` as its numeric value.
+- **Encodings:** latin1 and native inputs are translated to UTF-8; escaping and the handling of invalid bytes match `toJSON()`.
 
 The full `jsonlite::toJSON()` argument surface is supported.
 
 ## Implementation
 
-- **Work-aware parallel chunking** — chunk size comes from estimated work (columns, sampled string lengths, sampled geometry cost), so wide frames and polygon layers parallelise as readily as tall numeric ones. Small inputs stay serial.
-- **Number formatting matched to `jsonlite`** — the fixed-decimal path ports the same `modp_dtoa2` algorithm, so output agrees by construction; `%g` supplies the rest, taking its digits from `ryu` where rounding them provably gives the same answer, and `digits = Inf` is `ryu` outright.
-- **Strings escaped in place** — where a column's bytes are already valid UTF-8, workers escape R's `CHARSXP` data directly, copying each string once, in parallel.
-- **Table-driven escaping** — a 256-entry table probed eight bytes at a time, so a clean string costs one scan and one bulk copy.
-- **Direct access to R vectors** — raw pointers into `INTEGER`, `REAL`, `LOGICAL`, `STRING_PTR_RO`, with lengths carried alongside.
-- **Flat geometry arenas** — nested `sf` structures are flattened into contiguous coordinate arrays, letting specialised writers emit millions of coordinates in one pass.
-- **Dates and timestamps computed, not formatted** — `Date` is calendar arithmetic and needs no time zone; `POSIXct` needs R only for its UTC offset. R's `format()` costs about 5 microseconds per value, against tens of nanoseconds here.
-- **One pass over the output** — chunk offsets are known once the workers finish, so the result is sized exactly and written once, straight into its destination.
+- Rows and geometries are split into chunks by estimated work and serialized in parallel; small inputs stay serial.
+- Numbers: the fixed-decimal path ports `jsonlite`'s `modp_dtoa2`; `digits = Inf` uses Żmij, byte-identical to `ryu`.
+- Strings are escaped straight from R's storage, one copy each, through a 256-entry table.
+- Geometries are flattened into contiguous coordinate arrays and written in one pass.
+- Dates and timestamps are computed, not formatted: tens of nanoseconds per value against `format()`'s microseconds.
+- The result is sized exactly and written once into its destination.
 
 ## Development
 

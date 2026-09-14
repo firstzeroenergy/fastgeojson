@@ -151,6 +151,7 @@ Files:   vendor/ryu/*
 Authors: David Tolnay <dtolnay@gmail.com>
 License: Apache-2.0 OR BSL-1.0
 
+
 ------------------------------
 
 Name:    syn
@@ -166,5 +167,13 @@ Version: 1.0.22
 Files:   vendor/unicode-ident/*
 Authors: David Tolnay <dtolnay@gmail.com>
 License: (MIT OR Apache-2.0) AND Unicode-3.0
+
+------------------------------
+
+Name:    zmij
+Version: 1.0.23
+Files:   vendor/zmij/*
+Authors: David Tolnay <dtolnay@gmail.com>; a port of Victor Zverovich's Zmij
+License: MIT
 
 ------------------------------

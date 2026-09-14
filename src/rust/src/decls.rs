@@ -50,7 +50,6 @@ extern "C" {
     /// One call here replaces the two `Rf_getAttrib` walks (class, then dim)
     /// that the recursive serializer performed for every node, including the
     /// plain unattributed vectors that make up the bulk of nested data.
-    pub(crate) fn ATTRIB(x: libR_sys::SEXP) -> libR_sys::SEXP;
     /// Read-only element pointer for a VECSXP, so list traversal indexes
     /// memory instead of making a `VECTOR_ELT` call per element.
     pub(crate) fn VECTOR_PTR_RO(x: libR_sys::SEXP) -> *const libR_sys::SEXP;

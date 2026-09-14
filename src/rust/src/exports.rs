@@ -115,6 +115,9 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
     // serial phase of any size on this path: 30.15 ms on one worker and
     // 32.98 ms on 32, while serialization scaled 11.9x over the same range.
     let geom_ptr = geom_col as usize;
+    // What the workers may not read for themselves -- each feature's
+    // dimension, and its type in a mixed layer -- read here first.
+    let infos = unsafe { describe_geometries(geom_col, n_rows, sfc_type) };
     let par = ranges.len() > 1 && desired_threads() > 1;
     let mut chunk_geoms: Vec<(usize, usize, usize, ChunkGeoms)> = with_pool_if(par, || {
         ranges
@@ -126,6 +129,7 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
                     *start,
                     *end,
                     config,
+                    if infos.is_empty() { &[] } else { &infos[*start..*end] },
                 );
                 (*id, *start, *end, cg)
             })
@@ -439,6 +443,73 @@ unsafe fn stream_copy(dst: *mut u8, src: *const u8, len: usize) {
     std::ptr::copy_nonoverlapping(src, dst, len);
 }
 
+/// A large copy that does not go through the C runtime's `memcpy`.
+///
+/// On Windows the CRT's `memcpy` is `rep movsb`, and on Zen 4 that is fast
+/// only when source and destination share the same offset within a 4 KB page:
+/// measured on a 76 MB chunk, 12 ms when they did and 75-86 ms at every other
+/// offset. The chunks of the output land at arbitrary offsets, so every
+/// assembly copy took the slow path. Unaligned 16-byte loads and stores run
+/// at full bandwidth whatever the relative alignment; the compiler does not
+/// turn an intrinsics loop back into a `memcpy` call.
+///
+/// # Safety
+///
+/// `dst` writable for `len`, `src` readable for `len`, non-overlapping.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(crate) unsafe fn simd_copy(dst: *mut u8, src: *const u8, len: usize) {
+    use std::arch::x86_64::{_mm_loadu_si128, _mm_storeu_si128, __m128i};
+    if len < 256 {
+        std::ptr::copy_nonoverlapping(src, dst, len);
+        return;
+    }
+    let mut i = 0;
+    while i + 64 <= len {
+        let s = src.add(i) as *const __m128i;
+        let d = dst.add(i) as *mut __m128i;
+        let a = _mm_loadu_si128(s);
+        let b = _mm_loadu_si128(s.add(1));
+        let c = _mm_loadu_si128(s.add(2));
+        let e = _mm_loadu_si128(s.add(3));
+        _mm_storeu_si128(d, a);
+        _mm_storeu_si128(d.add(1), b);
+        _mm_storeu_si128(d.add(2), c);
+        _mm_storeu_si128(d.add(3), e);
+        i += 64;
+    }
+    while i + 16 <= len {
+        _mm_storeu_si128(dst.add(i) as *mut __m128i, _mm_loadu_si128(src.add(i) as *const __m128i));
+        i += 16;
+    }
+    std::ptr::copy_nonoverlapping(src.add(i), dst.add(i), len - i);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub(crate) unsafe fn simd_copy(dst: *mut u8, src: *const u8, len: usize) {
+    std::ptr::copy_nonoverlapping(src, dst, len);
+}
+
+/// Puts one chunk body at its place in the output.
+///
+/// Streaming stores only when source and destination agree modulo 16, where
+/// the loads are aligned too: 12.8 ms for a 76 MB chunk against 188 ms at any
+/// other relative offset, measured single-threaded. Everything else goes
+/// through `simd_copy`, 14 ms at every offset.
+///
+/// # Safety
+///
+/// As for `simd_copy`.
+#[inline]
+unsafe fn place(dst: *mut u8, src: *const u8, len: usize, nt: bool) {
+    if nt && (dst as usize).wrapping_sub(src as usize) & 15 == 0 {
+        stream_copy(dst, src, len);
+    } else {
+        simd_copy(dst, src, len);
+    }
+}
+
 /// Writes `open`, the parts at their offsets, the separating commas and
 /// `close` into `dst`, which must have room for exactly `total` bytes.
 ///
@@ -489,11 +560,7 @@ pub(crate) unsafe fn assemble_into(
             if offs[i] == usize::MAX {
                 continue;
             }
-            if nt {
-                stream_copy(dst.add(offs[i]), p.as_ptr(), p.len());
-            } else {
-                std::ptr::copy_nonoverlapping(p.as_ptr(), dst.add(offs[i]), p.len());
-            }
+            place(dst.add(offs[i]), p.as_ptr(), p.len(), nt);
         }
         return;
     }
@@ -509,11 +576,7 @@ pub(crate) unsafe fn assemble_into(
         /// Sync, rather than the bare `*mut u8` field, which is not.
         #[inline]
         unsafe fn write(&self, at: usize, src: &[u8], nt: bool) {
-            if nt {
-                stream_copy(self.0.add(at), src.as_ptr(), src.len());
-            } else {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(at), src.len());
-            }
+            place(self.0.add(at), src.as_ptr(), src.len(), nt);
         }
     }
     let base = Dst(dst);

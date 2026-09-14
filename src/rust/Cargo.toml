@@ -2,7 +2,7 @@
 name = "fastgeojson"
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.68"
+rust-version = "1.71"
 
 [lib]
 crate-type = ["staticlib"]
@@ -12,6 +12,7 @@ extendr-api = "0.8.2"
 extendr-ffi = "0.8.2"
 itoa = "1"
 ryu = "1"
+zmij = "1.0.23"
 rayon = "=1.10.0"
 rayon-core = "=1.12.1"
 

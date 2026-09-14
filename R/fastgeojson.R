@@ -78,22 +78,10 @@
 #'   `json_verbatim`, `UTC`, `time_format`, `always_decimal`, `use_signif`,
 #'   `indent`, `sf` and `as_bytes`.
 #'
-#'   `as_bytes = TRUE` is the one that is not a `toJSON()` argument. It
-#'   returns the same bytes as a **raw vector** instead of a character
-#'   vector, which skips R's string interning: building a character vector
-#'   makes R scan and hash every byte of the result to intern it in the
-#'   CHARSXP cache, at roughly a nanosecond per byte, and on a large result
-#'   that costs several times the serialization itself. Use it when the JSON
-#'   is on its way out of R -- `writeBin()` to a file or connection, an HTTP
-#'   response body, a socket. Writing an 18 MB result to a file takes 9 ms
-#'   through `writeBin()` against 101 ms through `writeLines()` on the
-#'   character result.
-#'
-#'   It is not a route to a string: `rawToChar()` pays the interning cost
-#'   back, and then some. It cannot be combined with `pretty`, which needs a
-#'   string to indent, and that combination is an error rather than a silent
-#'   fallback. The bytes are identical to the character result in every other
-#'   respect.
+#'   `as_bytes = TRUE`, which is not a `toJSON()` argument, returns the same
+#'   bytes as a **raw vector**, skipping R's string interning -- most of a
+#'   large call. Use it when the JSON is leaving R: `writeBin()` to a file or
+#'   connection, an HTTP response body. It cannot be combined with `pretty`.
 #'
 #' @return A length-one character vector of class `"json"`, or
 #'   `c("geojson", "json")` for `sf` input -- unless `as_bytes = TRUE`, which

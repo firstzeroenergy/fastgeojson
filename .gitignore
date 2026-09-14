@@ -29,3 +29,4 @@ AGENTS.md
 .mcp.json
 tests/testthat/_problems/
 tests/testthat/testthat-problems.rds
+README.html

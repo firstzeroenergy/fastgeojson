@@ -119,39 +119,132 @@ pub(crate) unsafe fn read_point_coord_ptr(x: libR_sys::SEXP) -> Option<CoordPtr>
     Some(CoordPtr { ptr: libR_sys::REAL(x) as usize, len, ncol: len.max(1) })
 }
 
-/// Reads an sfg coordinate matrix (or bare vector) into a thread-safe pointer,
-/// or `None` if it is not a plain double vector.
+/// Reads an sfg coordinate matrix (or bare vector) into a thread-safe pointer
+/// from inside a worker, or `None` if the R thread has to handle it.
 ///
-/// `ncol` comes from the `dim` attribute, so XYZ/XYM/XYZM geometries carry all
-/// their ordinates. A bare vector (as POINT uses) reports ncol equal to its
-/// length, i.e. a single row.
-pub(crate) unsafe fn read_coord_ptr(x: libR_sys::SEXP) -> Option<CoordPtr> {
+/// Workers must not read attributes: `Rf_getAttrib` writes NOT_MUTABLE into
+/// the attribute's header, which several threads would then do to one shared
+/// object at once, and the raw `ATTRIB` walk that avoided the write is not
+/// part of R's API (a WARNING under R 4.6). So the column count arrives as
+/// `ncol`, read on the R thread from the sfg's class -- `XY`, `XYZ`, `XYM`,
+/// `XYZM` -- by `describe_geometries`. Only two header reads happen here:
+/// the type and whether any attributes exist at all (`ANY_ATTRIB`, API).
+///
+/// A vector with no attributes is a bare row of ordinates, as POINT stores
+/// them. A matrix whose length is not a multiple of `ncol` -- a dimension its
+/// class does not describe -- goes back to the R thread, which reads `dim`
+/// itself.
+pub(crate) unsafe fn read_coord_ptr(x: libR_sys::SEXP, ncol: u8) -> Option<CoordPtr> {
     if !is_plain_real(x) {
         return None;
     }
     let len = sexp_len(x);
-    // The one remaining use of ATTRIB, which R-exts 6.21.6 says is not part
-    // of the API, so `R CMD check --as-cran` reports it. The documented
-    // substitute, Rf_getAttrib, cannot be used here: it calls
-    // MARK_NOT_MUTABLE on the attribute it returns, and this function runs in
-    // the worker pool across the geometries of one sfc, so several threads
-    // would write the same shared SEXP header at once.
-    //
-    // The alternative is to pre-read every geometry's dim on the R thread,
-    // which is the serial walk the parallel extraction exists to avoid --
-    // computing per-row work that way measured 5 ms for a million features.
-    // One documented non-API read is the better trade; it touches three
-    // pointers per link and writes nothing.
-    let dim = attrib_by_tag(x, libR_sys::R_DimSymbol);
-    let ncol = if dim != libR_sys::R_NilValue && sexp_len(dim) == 2 {
-        let d = libR_sys::INTEGER(dim);
-        let c = *d.add(1);
-        if c > 0 { c as usize } else { 1 }
-    } else {
-        // No dim: treat the whole vector as one row.
+    let ncol = if ANY_ATTRIB(x) == 0 {
         len.max(1)
+    } else if ncol >= 2 && len % ncol as usize == 0 {
+        ncol as usize
+    } else {
+        return None;
     };
     Some(CoordPtr { ptr: libR_sys::REAL(x) as usize, len, ncol })
+}
+
+/// What a worker needs to know about one feature and may not read for itself:
+/// the column count of its coordinate matrices, from the dimension token in
+/// its class, and its type where the layer is mixed. Zero means unknown, and
+/// the worker leaves that feature to the R thread.
+#[derive(Clone, Copy)]
+pub(crate) struct GeomInfo {
+    pub(crate) ncol: u8,
+    pub(crate) typ: SfcType,
+}
+
+/// The column count of the first coordinate matrix under `x`, from its `dim`
+/// -- read on the R thread with `Rf_getAttrib` -- or 0 if there is none
+/// within three levels of nesting (MULTIPOLYGON is two).
+unsafe fn first_matrix_ncol(x: libR_sys::SEXP, depth: u32) -> u8 {
+    let t = typeof_sexp(x);
+    if t == libR_sys::SEXPTYPE::REALSXP as u32 {
+        let dim = libR_sys::Rf_getAttrib(x, libR_sys::R_DimSymbol);
+        if dim != libR_sys::R_NilValue
+            && typeof_sexp(dim) == libR_sys::SEXPTYPE::INTSXP as u32
+            && sexp_len(dim) == 2
+        {
+            let c = *libR_sys::INTEGER(dim).add(1);
+            if c > 0 && c < 256 {
+                return c as u8;
+            }
+        }
+        return 0;
+    }
+    if t == libR_sys::SEXPTYPE::VECSXP as u32 && depth < 3 && sexp_len(x) > 0 {
+        return first_matrix_ncol(libR_sys::VECTOR_ELT(x, 0), depth + 1);
+    }
+    0
+}
+
+/// One pass over the layer on the R thread, reading each sfg's class with
+/// `Rf_getAttrib`. A POINT layer needs nothing from it -- its ordinates are
+/// bare vectors -- so it returns empty for one. Measured at about 25 ns per
+/// feature, which is what the parallel description used to spend walking the
+/// attribute list per ring anyway.
+pub(crate) unsafe fn describe_geometries(
+    geom_col: libR_sys::SEXP,
+    n: usize,
+    sfc_type: SfcType,
+) -> Vec<GeomInfo> {
+    if sfc_type == SfcType::Point {
+        return Vec::new();
+    }
+    let mixed = sfc_type == SfcType::GeometryCollection || sfc_type == SfcType::Unknown;
+    let elems = list_elems(geom_col);
+    let len = sexp_len(geom_col);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n.min(len) {
+        let sfg = match elems {
+            Some(p) => *p.add(i),
+            None => libR_sys::VECTOR_ELT(geom_col, i as isize),
+        };
+        let mut info = GeomInfo { ncol: 0, typ: sfc_type };
+        if sfg != libR_sys::R_NilValue {
+            // The first coordinate matrix's own `dim` is the truth for the
+            // layout, and every matrix of one sfg shares it; the class token
+            // below only stands in when there is no matrix to read (a POINT
+            // in a mixed layer, or an empty geometry).
+            info.ncol = first_matrix_ncol(sfg, 0);
+            // The class is read only when it is needed: for the type in a
+            // mixed layer, or for the dimension when there was no matrix to
+            // take it from. In the ordinary case that is one attribute read
+            // per feature, not two plus three string compares.
+            let classes = if mixed || info.ncol == 0 {
+                libR_sys::Rf_getAttrib(sfg, libR_sys::R_ClassSymbol)
+            } else {
+                libR_sys::R_NilValue
+            };
+            if classes != libR_sys::R_NilValue && typeof_sexp(classes) == libR_sys::SEXPTYPE::STRSXP as u32 {
+                let nc = sexp_len(classes);
+                for k in 0..nc {
+                    let s = libR_sys::STRING_ELT(classes, k as isize);
+                    let bytes = CStr::from_ptr(libR_sys::R_CHAR(s) as *const c_char).to_bytes();
+                    match bytes {
+                        b"XY" if info.ncol == 0 => info.ncol = 2,
+                        b"XYZ" | b"XYM" if info.ncol == 0 => info.ncol = 3,
+                        b"XYZM" if info.ncol == 0 => info.ncol = 4,
+                        b"POINT" if mixed => info.typ = SfcType::Point,
+                        b"MULTIPOINT" if mixed => info.typ = SfcType::MultiPoint,
+                        b"LINESTRING" if mixed => info.typ = SfcType::LineString,
+                        b"MULTILINESTRING" if mixed => info.typ = SfcType::MultiLineString,
+                        b"POLYGON" if mixed => info.typ = SfcType::Polygon,
+                        b"MULTIPOLYGON" if mixed => info.typ = SfcType::MultiPolygon,
+                        b"GEOMETRYCOLLECTION" if mixed => info.typ = SfcType::GeometryCollection,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        out.push(info);
+    }
+    out
 }
 
 /// Renders a GEOMETRYCOLLECTION (or any geometry) to bytes on the R thread.
@@ -189,7 +282,7 @@ pub(crate) unsafe fn render_geometry_to_bytes(
         }
         SfcType::Point => {
             buf.extend_from_slice(br#"{"type":"Point","coordinates":"#);
-            match read_coord_ptr(sfg) {
+            match read_coord_ptr_r_thread(sfg) {
                 Some(cp) => write_point_coords(buf, &cp, config),
                 // Not a double vector. jsonlite serialises the coordinate
                 // object with its generic writer, so integers stay integers
@@ -204,7 +297,7 @@ pub(crate) unsafe fn render_geometry_to_bytes(
             } else {
                 br#"{"type":"LineString","coordinates":"#
             });
-            match read_coord_ptr(sfg) {
+            match read_coord_ptr_r_thread(sfg) {
                 Some(cp) => write_coord_matrix(buf, &cp, config),
                 None => serialize_sexp_to_json_buffer(sfg, buf, config, depth + 1),
             }
@@ -222,7 +315,7 @@ pub(crate) unsafe fn render_geometry_to_bytes(
                     buf.push(b',');
                 }
                 let el = libR_sys::VECTOR_ELT(sfg, i as isize);
-                match read_coord_ptr(el) {
+                match read_coord_ptr_r_thread(el) {
                     Some(cp) => write_coord_matrix(buf, &cp, config),
                     None => serialize_sexp_to_json_buffer(el, buf, config, depth + 1),
                 }
@@ -244,7 +337,7 @@ pub(crate) unsafe fn render_geometry_to_bytes(
                         buf.push(b',');
                     }
                     let el = libR_sys::VECTOR_ELT(poly, k as isize);
-                    match read_coord_ptr(el) {
+                    match read_coord_ptr_r_thread(el) {
                         Some(cp) => write_coord_matrix(buf, &cp, config),
                         None => serialize_sexp_to_json_buffer(el, buf, config, depth + 1),
                     }
@@ -344,6 +437,9 @@ pub(crate) fn extract_geometries_chunk(
     start: usize,
     end: usize,
     config: SerializerConfig,
+    // One entry per feature of this chunk, from `describe_geometries`; empty
+    // for a POINT layer.
+    infos: &[GeomInfo],
 ) -> ChunkGeoms {
     // `config` is unused now that nothing is rendered here, but keeping it in
     // the signature keeps the call sites stable.
@@ -390,13 +486,15 @@ pub(crate) fn extract_geometries_chunk(
         }
         // The sfc's own class is only a hint: a homogeneous sfc_POINT column
         // can still be indexed per element, and sfc_GEOMETRY holds mixed
-        // types. jsonlite reads class(sfg)[2] for every element, so match that
-        // whenever the column class is not a reliable single type.
+        // types. jsonlite reads class(sfg)[2] for every element; the R thread
+        // did that in describe_geometries, and the worker takes its word.
+        let info = infos.get(i - start).copied().unwrap_or(GeomInfo { ncol: 0, typ: sfc_type });
         let row_type = if sfc_type == SfcType::GeometryCollection || sfc_type == SfcType::Unknown {
-            get_row_sfg_type(sfg)
+            info.typ
         } else {
             sfc_type
         };
+        let ncol = info.ncol;
 
         // Anything whose coordinates are not plain double vectors is handed
         // to the recursive writer instead, which is what jsonlite does with
@@ -428,7 +526,7 @@ pub(crate) fn extract_geometries_chunk(
                 }
             }
             SfcType::MultiPoint | SfcType::LineString => {
-                match unsafe { read_coord_ptr(sfg) } {
+                match unsafe { read_coord_ptr(sfg, ncol) } {
                     Some(cp) => out.push(FastGeom::Single(cp, row_type)),
                     None => prerender!(),
                 }
@@ -443,7 +541,7 @@ pub(crate) fn extract_geometries_chunk(
                         Some(r) => unsafe { *r.add(j) },
                         None => unsafe { libR_sys::VECTOR_ELT(sfg, j as isize) },
                     };
-                    match unsafe { read_coord_ptr(ring) } {
+                    match unsafe { read_coord_ptr(ring, ncol) } {
                         Some(cp) => batch.coords.push(cp),
                         None => {
                             ok = false;
@@ -480,7 +578,7 @@ pub(crate) fn extract_geometries_chunk(
                             Some(r) => unsafe { *r.add(k) },
                             None => unsafe { libR_sys::VECTOR_ELT(poly_sfg, k as isize) },
                         };
-                        match unsafe { read_coord_ptr(ring) } {
+                        match unsafe { read_coord_ptr(ring, ncol) } {
                             Some(cp) => batch.coords.push(cp),
                             None => {
                                 ok = false;
@@ -660,6 +758,27 @@ pub(crate) fn write_coord_value(buf: &mut Vec<u8>, v: f64, config: SerializerCon
 /// A bare coordinate vector, as POINT stores it: `[x, y]` / `[x, y, z]`.
 pub(crate) fn write_point_coords(buf: &mut Vec<u8>, cp: &CoordPtr, config: SerializerConfig) {
     let p = cp.ptr as *const f64;
+    if cp.len == 2 && config.digits == Some(DIGITS_SHORTEST) && !config.always_decimal {
+        let x = unsafe { *p };
+        let y = unsafe { *p.add(1) };
+        if x.is_finite() && y.is_finite() {
+            buf.reserve(2 * SHORTEST_MAX + 3);
+            unsafe {
+                let base = buf.as_mut_ptr();
+                let mut n = buf.len();
+                *base.add(n) = b'[';
+                n += 1;
+                n += write_shortest_raw(base.add(n), x);
+                *base.add(n) = b',';
+                n += 1;
+                n += write_shortest_raw(base.add(n), y);
+                *base.add(n) = b']';
+                n += 1;
+                buf.set_len(n);
+            }
+            return;
+        }
+    }
     buf.reserve(cp.len * 26 + 2);
     buf.push(b'[');
     for i in 0..cp.len {
@@ -697,6 +816,10 @@ fn write_coord_rows(
     config: SerializerConfig,
 ) {
     let p = cp.ptr as *const f64;
+    if ncol == 2 && config.digits == Some(DIGITS_SHORTEST) && !config.always_decimal {
+        write_coord_rows_xy_shortest(out, cp, nrow, start, end, config);
+        return;
+    }
     out.reserve((end - start) * (ncol * 26 + 3) + 2);
     if start == 0 {
         out.push(b'[');
@@ -717,6 +840,75 @@ fn write_coord_rows(
     }
     if end == nrow {
         out.push(b']');
+    }
+}
+
+/// `write_coord_rows` for the common case: two columns, lossless digits, no
+/// `always_decimal`. One reservation for the whole range, then every byte
+/// goes through a pointer -- no per-byte capacity checks, no per-value
+/// dispatch on `digits`, no second `reserve` inside the number writer. A
+/// non-finite ordinate hands that one row to the generic writer, which
+/// produces exactly what this loop would have, so the output is the same
+/// byte for byte either way. In isolation the loop runs at 24 ns per
+/// ordinate against ryu's own 22, so the number formatting is nearly all of
+/// it; the README polygons went from 227 to 218 ms single-threaded.
+fn write_coord_rows_xy_shortest(
+    out: &mut Vec<u8>,
+    cp: &CoordPtr,
+    nrow: usize,
+    start: usize,
+    end: usize,
+    config: SerializerConfig,
+) {
+    // Per row: ",[" + number + "," + number + "]", plus the outer brackets.
+    const ROW_MAX: usize = 2 * SHORTEST_MAX + 4;
+    let p = cp.ptr as *const f64;
+    out.reserve((end - start) * ROW_MAX + 2);
+    unsafe {
+        let mut base = out.as_mut_ptr();
+        let mut n = out.len();
+        if start == 0 {
+            *base.add(n) = b'[';
+            n += 1;
+        }
+        for i in start..end {
+            let x = *p.add(i);
+            let y = *p.add(i + nrow);
+            if !(x.is_finite() && y.is_finite()) {
+                // The generic row for this one, through the Vec's own API;
+                // then back to the pointer, re-reserved in case it moved.
+                out.set_len(n);
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.push(b'[');
+                write_coord_value(out, x, config);
+                out.push(b',');
+                write_coord_value(out, y, config);
+                out.push(b']');
+                out.reserve((end - i - 1) * ROW_MAX + 2);
+                base = out.as_mut_ptr();
+                n = out.len();
+                continue;
+            }
+            if i > 0 {
+                *base.add(n) = b',';
+                n += 1;
+            }
+            *base.add(n) = b'[';
+            n += 1;
+            n += write_shortest_raw(base.add(n), x);
+            *base.add(n) = b',';
+            n += 1;
+            n += write_shortest_raw(base.add(n), y);
+            *base.add(n) = b']';
+            n += 1;
+        }
+        if end == nrow {
+            *base.add(n) = b']';
+            n += 1;
+        }
+        out.set_len(n);
     }
 }
 
@@ -809,26 +1001,9 @@ pub(crate) fn write_coord_matrix(buf: &mut Vec<u8>, cp: &CoordPtr, config: Seria
         write_coord_matrix_split(buf, cp, nrow, ncol, config);
         return;
     }
-    let p = cp.ptr as *const f64;
-    // One reservation for the whole ring: a 200-vertex polygon otherwise
-    // grows the buffer repeatedly inside the hottest sf loop.
-    buf.reserve(nrow * (ncol * 26 + 3) + 2);
-    buf.push(b'[');
-    for i in 0..nrow {
-        if i > 0 {
-            buf.push(b',');
-        }
-        buf.push(b'[');
-        for j in 0..ncol {
-            if j > 0 {
-                buf.push(b',');
-            }
-            // Column-major: element (i, j) lives at i + j * nrow.
-            write_coord_value(buf, unsafe { *p.add(i + j * nrow) }, config);
-        }
-        buf.push(b']');
-    }
-    buf.push(b']');
+    // The whole matrix as one row range, which also selects the two-column
+    // fast path for the ordinary ring.
+    write_coord_rows(buf, cp, nrow, ncol, 0, nrow, config);
 }
 
 pub(crate) fn write_geometry_parallel(

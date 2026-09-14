@@ -834,6 +834,53 @@ mod tests {
     }
 
     #[test]
+    fn shortest_layout_is_byte_identical_to_ryu() {
+        // Dragonbox digits in ryu's layout must be what ryu itself writes, on
+        // every branch of the layout and across the whole exponent range.
+        let mut ours = [0u8; 32];
+        let mut theirs = [0u8; 32];
+        let mut check = |v: f64| {
+            let a = unsafe { crate::shortest_layout(v, ours.as_mut_ptr()) };
+            let b = unsafe { ryu::raw::format64(v, theirs.as_mut_ptr()) };
+            assert_eq!(
+                std::str::from_utf8(&ours[..a]).unwrap(),
+                std::str::from_utf8(&theirs[..b]).unwrap(),
+                "for {:e} (bits {:#x})", v, v.to_bits()
+            );
+        };
+        for v in [
+            0.0, -0.0, 1.0, -1.0, 0.1, 0.5, 1.5, 100.0, 123000.0, 1e15, 1e16, 1e17, 9.999e15,
+            1e-4, 1e-5, 1e-6, 1.5e300, 1e300, 1e-300, 5e-324, f64::MIN_POSITIVE, f64::MAX,
+            f64::MIN, 9007199254740992.0, 9007199254740993.0, 0.30000000000000004,
+            3.141592653589793, 2.5e-300, 1.7976931348623157e308, 2.2250738585072014e-308,
+            123456789012345680.0, 0.000123456, 1234.5678, 12.34, 0.001234,
+        ] {
+            check(v);
+        }
+        for p in -324..=308 {
+            check(format!("1e{p}").parse::<f64>().unwrap());
+            check(format!("-3e{p}").parse::<f64>().unwrap());
+            check(format!("7.5e{p}").parse::<f64>().unwrap());
+        }
+        let mut rng = Rng(0x0DDB_A11C_0FFE_E000);
+        let mut n = 0;
+        while n < 5_000_000 {
+            let v = f64::from_bits(rng.next());
+            if v.is_finite() {
+                check(v);
+                n += 1;
+            }
+        }
+        // uniform (0, 1) and coordinate-like values, the common shapes
+        for _ in 0..2_000_000 {
+            let u = (rng.next() >> 11) as f64 / (1u64 << 53) as f64;
+            check(u);
+            check(-125.0 + u * 59.0);
+            check(u * 1e6);
+        }
+    }
+
+    #[test]
     fn shortest_round_trips_every_double_it_is_given() {
         // digits = Inf: the shortest decimal that reads back as the same
         // double. Integral values below 2^53 take a separate branch.

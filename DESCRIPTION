@@ -20,6 +20,7 @@ BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
 Depends: R (>= 4.5)
 SystemRequirements: Cargo (Rust's package manager), rustc
 Encoding: UTF-8
+Language: en-US
 Roxygen: list(markdown = TRUE)
 Suggests: 
     testthat (>= 3.0.0),
