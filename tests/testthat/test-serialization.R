@@ -40,9 +40,15 @@ test_that("as_json produces valid GeoJSON", {
 test_that("numbers are lossless by default", {
   # digits = Inf: the shortest decimal that reads back as the same double.
   # toJSON()'s 4 decimal places are opt-in, never the default.
-  x <- c(pi, 0.1 + 0.2, 1e-5, 0.000151481324748, 1234567.125, -2.5e-300, 1e300)
+  #
+  # The extreme values are powers of two, which every platform constructs
+  # exactly. A literal like 1e300 is not: R's parser scales by powers of ten
+  # in long double, and where that is 64 bits (macOS on arm64) it lands a few
+  # ulp off, so the double being formatted -- and the correct output for it
+  # -- differs from platform to platform.
+  x <- c(pi, 0.1 + 0.2, 1e-5, 0.000151481324748, 1234567.125, -2^-1000, 2^1000)
   expect_identical(as.character(as_json(x)),
-                   "[3.141592653589793,0.30000000000000004,0.00001,0.000151481324748,1234567.125,-2.5e-300,1e300]")
+                   "[3.141592653589793,0.30000000000000004,0.00001,0.000151481324748,1234567.125,-9.332636185032189e-302,1.0715086071862673e301]")
   expect_identical(jsonlite::fromJSON(as_json(x)), x)
 
   set.seed(42)
