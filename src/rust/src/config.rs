@@ -92,6 +92,27 @@ pub(crate) struct SerializerConfig {
     /// jsonlite's `always_decimal`: render whole doubles as `100.0` rather
     /// than `100`, so a numeric column never looks like an integer column.
     pub(crate) always_decimal: bool,
+    /// jsonlite's `json_verbatim`. When false -- the default -- a value
+    /// carrying the `json` class is an ordinary character string and is
+    /// escaped like one; only when true is its text spliced into the output.
+    ///
+    /// This used to be honoured in R, and so only for the outermost object: a
+    /// `json` value nested anywhere was spliced whatever the setting, which
+    /// lets a string decide the shape of the document around it.
+    pub(crate) json_verbatim: bool,
+    /// `digits` counts SIGNIFICANT digits rather than decimal places, which is
+    /// what `digits = I(n)` asks for. Renders through `%.*g`.
+    pub(crate) signif: bool,
+    /// jsonlite's `rownames`, which has three states rather than two:
+    /// `ROWNAMES_NEVER` when it was given as FALSE, `ROWNAMES_REAL` when it was
+    /// not given at all (emit `_row` only for row names that are really there),
+    /// and `ROWNAMES_ALWAYS` when it was given as TRUE, which emits `_row` even
+    /// for the automatic 1..n -- as unquoted integers, since that is what
+    /// toJSON() writes for them.
+    ///
+    /// It used to be applied in R, which meant it reached only the outermost
+    /// frame: `as_json(list(d = df), rownames = FALSE)` still emitted `_row`.
+    pub(crate) rownames: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -126,6 +147,17 @@ pub(crate) enum ColumnType {
     MatrixReal,
     /// The same for an integer matrix.
     MatrixInt,
+    MatrixBool,
+    /// An array of three or more dimensions, read in the worker. `aux` says
+    /// which of the three pointer-readable types it is; `arr_shape` carries
+    /// the nesting.
+    ArrayDirect,
+    /// A whole column rendered once rather than cell by cell: its arena holds
+    /// exactly one entry and the column writer emits it in place of the usual
+    /// `[cell, cell, ...]`. Used for a data.frame-valued column under
+    /// `dataframe = "columns"`, which toJSON() renders as one column-oriented
+    /// object rather than one object per row.
+    JsonWhole,
     JsonRaw,
     Null,
 }
@@ -161,6 +193,7 @@ unsafe impl Sync for StringArena {}
 ///   `CD_NA`               the cell is NA
 ///   `CD_ARENA` set        low bits index `string_arena.offsets`, whose bytes
 ///                         are already escaped and quoted
+///   `CD_LATIN1` set       read R's bytes directly and widen them to UTF-8
 ///   `CD_ESC` set          read R's bytes directly, but they need escaping
 ///   otherwise             read R's bytes directly and copy them verbatim
 ///
@@ -173,8 +206,26 @@ pub(crate) const CD_XLATE: u32 = u32::MAX - 1;
 pub(crate) const CD_ESC: u32 = 0x8000_0000;
 /// Cell was pre-rendered into the column's arena by the R thread.
 pub(crate) const CD_ARENA: u32 = 0x4000_0000;
+/// Cell is latin1 and the worker widens it to UTF-8 itself.
+///
+/// latin1 is ISO-8859-1, whose 256 code points ARE the first 256 of Unicode,
+/// so the conversion is two lines and needs no table and no locale: a byte
+/// below 0x80 stands for itself, and one above becomes `0xC0 | b >> 6`,
+/// `0x80 | b & 0x3F`. Doing it here rather than through
+/// `Rf_translateCharUTF8` is what lets a latin1 column stay in the workers;
+/// R's route is an iconv call per cell on the R thread, and measured 814 ms
+/// against 7.5 for the same 300,000 values held as UTF-8.
+pub(crate) const CD_LATIN1: u32 = 0x2000_0000;
 /// Payload mask: a byte length, or an arena index.
-pub(crate) const CD_LEN: u32 = 0x3FFF_FFFF;
+///
+/// Twenty-nine bits since `CD_LATIN1` took one, so a single cell is capped at
+/// 512 MB and a column at half a billion arena entries.
+pub(crate) const CD_LEN: u32 = 0x1FFF_FFFF;
+
+/// `aux` codes for an `ArrayDirect` column.
+pub(crate) const ARR_REAL: u32 = 0;
+pub(crate) const ARR_INT: u32 = 1;
+pub(crate) const ARR_LGL: u32 = 2;
 
 pub(crate) struct ThreadSafeColumn {
     pub(crate) kind: ColumnType,
@@ -192,6 +243,10 @@ pub(crate) struct ThreadSafeColumn {
     /// parallel prepass that decides the column can be read directly. See
     /// `CD_NA` for the encoding.
     pub(crate) char_meta: Option<Vec<u32>>,
+    /// Shape of an `ArrayDirect` column: the dimensions after the row one,
+    /// then their strides, in one allocation. Every other kind leaves it None,
+    /// which costs eight bytes in the descriptor and nothing per cell.
+    pub(crate) arr_shape: Option<Box<[usize]>>,
 }
 unsafe impl Send for ThreadSafeColumn {}
 unsafe impl Sync for ThreadSafeColumn {}
@@ -259,13 +314,25 @@ pub(crate) fn parse_r_string_arg(x: Robj, default: &str) -> String {
     default.to_string()
 }
 
+/// True when `digits` carries R's `AsIs` class, which is how `I(n)` asks for
+/// significant rather than decimal digits. jsonlite decides the same way:
+/// `use_signif = is(digits, "AsIs")`.
+/// `rownames` states; see `SerializerConfig::rownames`.
+pub(crate) const ROWNAMES_NEVER: u8 = 0;
+pub(crate) const ROWNAMES_REAL: u8 = 1;
+pub(crate) const ROWNAMES_ALWAYS: u8 = 2;
+
+pub(crate) fn parse_signif_arg(x: &Robj) -> bool {
+    x.inherits("AsIs")
+}
+
 pub(crate) fn parse_digits_arg(x: Robj) -> Option<u8> {
     if x.is_null() { return None; }
     if let Some(i) = x.as_integer() {
         if i == DIGITS_SHORTEST as i32 {
             return Some(DIGITS_SHORTEST);
         }
-        let d = i.max(0).min(16) as u8;
+        let d = i.max(0).min(17) as u8;
         return Some(d);
     }
     if let Some(f) = x.as_real() {
@@ -279,7 +346,7 @@ pub(crate) fn parse_digits_arg(x: Robj) -> Option<u8> {
             if i == DIGITS_SHORTEST as i32 {
                 return Some(DIGITS_SHORTEST);
             }
-            let d = i.max(0).min(16) as u8;
+            let d = i.max(0).min(17) as u8;
             return Some(d);
         }
     }

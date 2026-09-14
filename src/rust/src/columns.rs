@@ -8,33 +8,68 @@ use crate::*;
 // PARALLEL SAFE COLUMNS
 // ------------------------------------------------------------------
 
+/// Whether a frame's `row.names` are the automatic 1..n.
+///
+/// Safe to call with either the stored attribute or `Rf_getAttrib`'s result.
+/// `getAttrib` special-cases `R_RowNamesSymbol` and expands the compact
+/// `c(NA, -n)` form into a 1..n INTSXP, which costs an allocation of n
+/// integers -- but not the answer: the test below is "is it a STRSXP", and
+/// compact and expanded are both INTSXP, so they agree. Character row names
+/// come back unchanged either way.
 pub(crate) unsafe fn is_default_rownames(rn: libR_sys::SEXP) -> bool {
-    if rn == libR_sys::R_NilValue { return true; }
-    if typeof_sexp(rn) == libR_sys::SEXPTYPE::INTSXP as u32 && sexp_len(rn) == 2 {
-        let p = libR_sys::INTEGER(rn);
-        if *p == libR_sys::R_NaInt { return true; }
+    // jsonlite's own condition, from asJSON.data.frame:
+    //
+    //   isTRUE(rownames) || (is.null(rownames) &&
+    //     is.character(attr(x, "row.names")) &&
+    //     !all(grepl("^\\d+$", row.names(x))))
+    //
+    // So `_row` appears only when the attribute is a *character* vector and at
+    // least one element is not all digits. Anything else -- automatic names,
+    // an integer vector, or character names that all look like numbers -- is
+    // uninformative and omitted.
+    //
+    // This used to compare against 1..n instead, which emitted `_row` for
+    // integer row names c(5,6,7) and for character c("5","6","7") where
+    // jsonlite emits nothing.
+    if rn == libR_sys::R_NilValue {
+        return true;
+    }
+    if typeof_sexp(rn) != libR_sys::SEXPTYPE::STRSXP as u32 {
+        return true;
     }
     let n = sexp_len(rn);
-    if typeof_sexp(rn) == libR_sys::SEXPTYPE::INTSXP as u32 {
-        let p = libR_sys::INTEGER(rn);
-        for i in 0..n {
-            if *p.add(i) != (i as i32 + 1) { return false; }
+    for i in 0..n {
+        let s_sexp = libR_sys::STRING_ELT(rn, i as isize);
+        if is_na_string(s_sexp) {
+            return false;
         }
+        let len = libR_sys::Rf_xlength(s_sexp);
+        // `\d+` needs at least one digit, so "" is informative.
+        if len <= 0 {
+            return false;
+        }
+        let bytes = slice::from_raw_parts(libR_sys::R_CHAR(s_sexp) as *const u8, len as usize);
+        if !bytes.iter().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Is the `row.names` attribute the compact automatic form, `c(NA, -n)`?
+///
+/// Distinct from `is_default_rownames`, which answers a different question --
+/// whether jsonlite OMITS `_row` when `rownames` was not given. Integer row
+/// names and character ones that are all digits are omitted by default but are
+/// still real names, and `rownames = TRUE` prints those rather than 1..n.
+#[inline]
+pub(crate) unsafe fn is_compact_rownames(rn: libR_sys::SEXP) -> bool {
+    if rn == libR_sys::R_NilValue {
         return true;
     }
-    if typeof_sexp(rn) == libR_sys::SEXPTYPE::STRSXP as u32 {
-        let mut tmp = itoa::Buffer::new();
-        for i in 0..n {
-            let s_sexp = libR_sys::STRING_ELT(rn, i as isize);
-            if is_na_string(s_sexp) { return false; }
-            let s_ptr = libR_sys::R_CHAR(s_sexp) as *const c_char;
-            let s_slice = CStr::from_ptr(s_ptr).to_bytes();
-            let expected = tmp.format(i + 1);
-            if s_slice != expected.as_bytes() { return false; }
-        }
-        return true;
-    }
-    false
+    typeof_sexp(rn) == libR_sys::SEXPTYPE::INTSXP as u32
+        && sexp_len(rn) == 2
+        && is_na_int(*libR_sys::INTEGER(rn))
 }
 
 // ------------------------------------------------------------------
@@ -65,6 +100,20 @@ pub(crate) const CLS_BLOB: u16 = 1 << 9;
 /// already shifted by its UTC offset, so the writer can format it without
 /// consulting a time zone. Carries the wanted layout in a `fgjfmt` attribute.
 pub(crate) const CLS_FGJTIME: u16 = 1 << 10;
+/// JSON text that `.prep()` rendered itself -- a mongo date or binary, a
+/// complex row -- and that is always spliced.
+///
+/// Distinct from `json`, which is a class a USER can put on any string and
+/// which `json_verbatim = FALSE`, the default, means "escape it like the
+/// string it is". Both used to be `json`, so turning the user's off turned
+/// ours off too and mongo timestamps came out quoted: 21 tests.
+pub(crate) const CLS_FGJSON: u16 = 1 << 11;
+
+/// Is this value's text spliced into the output rather than escaped?
+#[inline]
+pub(crate) fn splices_verbatim(cls: u16, config: SerializerConfig) -> bool {
+    cls & CLS_FGJSON != 0 || (cls & CLS_JSON != 0 && config.json_verbatim)
+}
 
 /// Classes that must be re-encoded in R before the serializer sees them.
 pub(crate) const CLS_NEEDS_PREP: u16 =
@@ -102,6 +151,7 @@ pub(crate) unsafe fn classify(x: libR_sys::SEXP) -> u16 {
             b"integer64" => CLS_INT64,
             b"blob" => CLS_BLOB,
             b"fgjtime" => CLS_FGJTIME,
+            b"fgjson" => CLS_FGJSON,
             _ => 0,
         };
     }
@@ -194,7 +244,7 @@ unsafe fn write_arr_cell(
             if is_na_real(v) {
                 bytes.extend_from_slice(if num_na_as_text { br#""NA""# } else { b"null" });
             } else if v.is_finite() {
-                write_f64_json(bytes, v, config.digits, config.always_decimal);
+                write_f64_json(bytes, v, config);
             } else if !num_na_as_text {
                 bytes.extend_from_slice(b"null");
             } else if v == f64::INFINITY {
@@ -236,6 +286,53 @@ unsafe fn write_arr_cell(
     }
 }
 
+/// One cell of a numeric or logical array, read through a raw pointer.
+///
+/// The same three element writers the recursive serializer uses, so an array
+/// column and a bare array cannot drift apart.
+#[inline]
+unsafe fn write_arr_num_cell(
+    bytes: &mut Vec<u8>,
+    ptr: usize,
+    tag: u32,
+    idx: usize,
+    config: SerializerConfig,
+) {
+    match tag {
+        ARR_REAL => write_real_elem(bytes, *(ptr as *const f64).add(idx), config),
+        ARR_INT => write_int_elem(bytes, *(ptr as *const i32).add(idx), config),
+        _ => write_lgl_elem(bytes, *(ptr as *const i32).add(idx), config),
+    }
+}
+
+/// `write_arr_slice` for a column described rather than pre-rendered.
+///
+/// `shape` is the dimensions after the row one followed by their strides, so
+/// `nd` is half its length.
+pub(crate) unsafe fn write_arr_num_slice(
+    bytes: &mut Vec<u8>,
+    ptr: usize,
+    tag: u32,
+    shape: &[usize],
+    j: usize,
+    offset: usize,
+    config: SerializerConfig,
+) {
+    let nd = shape.len() / 2;
+    if j == nd {
+        write_arr_num_cell(bytes, ptr, tag, offset, config);
+        return;
+    }
+    bytes.push(b'[');
+    for i in 0..shape[j] {
+        if i > 0 {
+            bytes.push(b',');
+        }
+        write_arr_num_slice(bytes, ptr, tag, shape, j + 1, offset + i * shape[nd + j], config);
+    }
+    bytes.push(b']');
+}
+
 /// Writes one row's slice of an array, nesting over dimensions 2..N with the
 /// last dimension innermost, which is the shape jsonlite produces.
 ///
@@ -266,31 +363,85 @@ unsafe fn write_arr_slice(
     bytes.push(b']');
 }
 
+/// `depth` is the recursion depth of the caller. The list-column and
+/// nested-frame branches recurse back into the serializer, which now
+/// serialises a nested data.frame through this same builder, so the counter
+/// has to travel with it: hardcoding 0 here would let a chain of frames
+/// joined by list columns recurse without a bound.
+/// `Rtype` for a SEXP without building an `Robj` to ask.
+///
+/// Everything the branch chain below distinguishes is here; the rest maps to
+/// `Null`, which is where those types already ended up.
+#[inline]
+unsafe fn rtype_of(sexp: libR_sys::SEXP) -> Rtype {
+    match typeof_sexp(sexp) {
+        t if t == libR_sys::SEXPTYPE::REALSXP as u32 => Rtype::Doubles,
+        t if t == libR_sys::SEXPTYPE::INTSXP as u32 => Rtype::Integers,
+        t if t == libR_sys::SEXPTYPE::LGLSXP as u32 => Rtype::Logicals,
+        t if t == libR_sys::SEXPTYPE::STRSXP as u32 => Rtype::Strings,
+        t if t == libR_sys::SEXPTYPE::VECSXP as u32 => Rtype::List,
+        _ => Rtype::Null,
+    }
+}
+
 pub(crate) fn build_thread_safe_cols(
-    df: &List,
-    colnames: &[Vec<u8>],
+    df: libR_sys::SEXP,
+    // Already escaped, padded and colon-terminated, from `escaped_keys`, and
+    // consumed rather than borrowed: the descriptor owns its key, so
+    // borrowing here only meant cloning it back out.
+    keys: Vec<Key>,
     skip_idx: usize,
     _expected_rows: usize,
     config: SerializerConfig,
-) -> Result<Vec<(Vec<u8>, ThreadSafeColumn)>> {
-    let mut out = Vec::with_capacity(colnames.len() + 1);
+    depth: u32,
+) -> Result<Vec<(Key, ThreadSafeColumn)>> {
+    let mut out = Vec::with_capacity(keys.len() + 1);
+    // One base pointer for the frame, and no Robj per column.
+    //
+    // `List::elt` returns an Robj, whose constructor takes extendr's global
+    // ownership mutex, inserts into a hash map and calls Rf_protect, with Drop
+    // taking the same mutex again; `inherits` then fetches and walks the class
+    // attribute once per name asked, and this asked up to six. Together they
+    // measured 0.62 us per column of pure setup -- against about 30 ns to
+    // write a three-row integer column -- so 200 small nested frames of two
+    // columns spent nearly all of their time here. The recursive serializer
+    // had already replaced exactly this pattern with a single `classify`
+    // bitset; the column builder had not inherited it.
+    let n_df_cols = unsafe { sexp_len(df) };
+    let elems = unsafe { list_elems(df) };
 
-    for (j, nm) in colnames.iter().enumerate() {
+    for (j, key) in keys.into_iter().enumerate() {
         if j == skip_idx { continue; }
-        let mut col = df.elt(j).map_err(|_| {
-            Error::Other(format!("Column '{}' missing", String::from_utf8_lossy(nm)))
-        })?;
+        let raw = match elems {
+            Some(p) if j < n_df_cols => unsafe { *p.add(j) },
+            _ => return Err(Error::Other(format!("Column {} missing", j + 1))),
+        };
+        let mut cls = unsafe { classify(raw) };
         // A POSIXt column has to go through R, because only R holds the time
         // zone rules. A Date column does not: it is plain day arithmetic, and
         // the DateReal/DateInt column types below format it in the worker.
         // Routing Date through format() here cost 4.7 us per value, which was
         // 99% of the time spent serialising a Date column.
-        if col.inherits("POSIXt") {
-             col = call!("format", &col).map_err(|e| Error::Other(format!("format failed: {:?}", e)))?;
+        //
+        // `owned` holds format()'s result, which is a SEXP WE created rather
+        // than one the caller handed us. R-exts puts the distinction plainly
+        // (6.2 Allocating storage): an argument is protected by the caller for
+        // the duration of the call, and nothing else is. This one is protected
+        // only by `owned`, which dies at the end of this iteration -- so no
+        // descriptor may point into it. See the `derived` test below, which is
+        // what keeps that true.
+        let mut sexp = raw;
+        let mut owned: Option<Robj> = None;
+        if cls & CLS_POSIXT != 0 {
+            let f = call!("format", Robj::from_sexp(raw))
+                .map_err(|e| Error::Other(format!("format failed: {:?}", e)))?;
+            sexp = unsafe { f.get() };
+            cls = unsafe { classify(sexp) };
+            owned = Some(f);
         }
-        let sexp = unsafe { col.get() };
-        let r_type = col.rtype();
-        let key = build_escaped_key_bytes(nm);
+        // True when the column's bytes live in a SEXP this function created.
+        let derived = owned.is_some();
+        let r_type = unsafe { rtype_of(sexp) };
 
         let dim_attr = unsafe { libR_sys::Rf_getAttrib(sexp, libR_sys::R_DimSymbol) };
         // Any array whose first dimension is the row count, not just a
@@ -320,14 +471,19 @@ pub(crate) fn build_thread_safe_cols(
              // reads R's column-major storage directly, in the worker. Only
              // the two-dimensional case, because a deeper array needs nesting
              // that the flat cell writer does not express.
+             // A logical matrix belongs here with the numeric ones: it needs
+             // no encoding at all, so there was never a reason to render it
+             // serially into an arena on the R thread.
              if dims.len() == 2
                  && n_matrix_cols <= u32::MAX as usize
-                 && (r_type == Rtype::Doubles || r_type == Rtype::Integers)
+                 && (r_type == Rtype::Doubles
+                     || r_type == Rtype::Integers
+                     || r_type == Rtype::Logicals)
              {
-                 let (kind, ptr) = if r_type == Rtype::Doubles {
-                     (ColumnType::MatrixReal, unsafe { libR_sys::REAL(sexp) as *const u8 as usize })
-                 } else {
-                     (ColumnType::MatrixInt, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize })
+                 let (kind, ptr) = match r_type {
+                     Rtype::Doubles => (ColumnType::MatrixReal, unsafe { libR_sys::REAL(sexp) as *const u8 as usize }),
+                     Rtype::Logicals => (ColumnType::MatrixBool, unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize }),
+                     _ => (ColumnType::MatrixInt, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }),
                  };
                  out.push((key, ThreadSafeColumn {
                      kind,
@@ -337,17 +493,52 @@ pub(crate) fn build_thread_safe_cols(
                      cached_levels: None,
                      string_arena: None,
                      char_meta: None,
+                     arr_shape: None,
                  }));
                  continue;
              }
 
-             // Everything else is rendered here: a logical or character matrix
-             // needs the encoding handling the plain column arms have, and a
-             // deeper array needs the nested walk.
              let mut strides = vec![1usize; dims.len()];
              for k in 1..dims.len() {
                  strides[k] = strides[k - 1] * dims[k - 1];
              }
+
+             // Three dimensions or more, and pointer-readable: described for
+             // the workers like the two-dimensional case above, rather than
+             // rendered serially into an arena. A 1000 x 20 x 10 double array
+             // column cost 30.1 ns per value that way; the descriptor brings
+             // it to what the matrix column costs.
+             let tag = match r_type {
+                 Rtype::Doubles => Some(ARR_REAL),
+                 Rtype::Integers => Some(ARR_INT),
+                 Rtype::Logicals => Some(ARR_LGL),
+                 _ => None,
+             };
+             if let Some(tag) = tag {
+                 let ptr = match tag {
+                     ARR_REAL => unsafe { libR_sys::REAL(sexp) as *const u8 as usize },
+                     ARR_INT => unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize },
+                     _ => unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize },
+                 };
+                 let mut shape: Vec<usize> = Vec::with_capacity((dims.len() - 1) * 2);
+                 shape.extend_from_slice(&dims[1..]);
+                 shape.extend_from_slice(&strides[1..]);
+                 out.push((key, ThreadSafeColumn {
+                     kind: ColumnType::ArrayDirect,
+                     aux: tag,
+                     data_ptr: ptr,
+                     len: _expected_rows,
+                     cached_levels: None,
+                     string_arena: None,
+                     char_meta: None,
+                     arr_shape: Some(shape.into_boxed_slice()),
+                 }));
+                 continue;
+             }
+
+             // A character array is left here: its cells need the encoding
+             // handling the plain column arms have, which allocates on R's
+             // vmax stack and so cannot happen in a worker.
              let mut bytes = Vec::new();
              let mut offsets = Vec::with_capacity(_expected_rows);
              for r in 0.._expected_rows {
@@ -358,7 +549,7 @@ pub(crate) fn build_thread_safe_cols(
                  offsets.push((start, bytes.len() - start));
              }
              let col_len = offsets.len();
-             let col = ThreadSafeColumn { kind: ColumnType::JsonRaw, aux: 0, data_ptr: 0, len: col_len, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }), char_meta: None };
+             let col = ThreadSafeColumn { kind: ColumnType::JsonRaw, aux: 0, data_ptr: 0, len: col_len, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }), char_meta: None, arr_shape: None };
              out.push((key, col));
              continue;
         }
@@ -366,12 +557,14 @@ pub(crate) fn build_thread_safe_cols(
         // Set by the fgjtime branch below; every other kind leaves it zero.
         let mut aux: u32 = 0;
         let (kind, ptr, cached_levels, arena) =
-            if col.inherits("fgjtime") && r_type == Rtype::Doubles {
+            if cls & CLS_FGJTIME != 0 && r_type == Rtype::Doubles {
                 aux = unsafe { fgj_fmt_code(sexp) }.unwrap_or(TFMT_SPACE);
                 (ColumnType::TimeLocal, unsafe { libR_sys::REAL(sexp) as *const u8 as usize }, None, None)
-            } else if col.inherits("factor") && r_type == Rtype::Integers && config.factor == FactorMode::String {
-                let levels = col.get_attrib("levels").ok_or_else(|| Error::Other("Factor missing levels".to_string()))?;
-                let levels_sexp = unsafe { levels.get() };
+            } else if cls & CLS_FACTOR != 0 && r_type == Rtype::Integers && config.factor == FactorMode::String {
+                let levels_sexp = unsafe { levels_of(sexp) };
+                if levels_sexp == unsafe { libR_sys::R_NilValue } {
+                    return Err(Error::Other("Factor missing levels".to_string()));
+                }
                 let n = unsafe { sexp_len(levels_sexp) };
                 let mut cache = Vec::with_capacity(n);
                 for idx in 0..n {
@@ -384,7 +577,7 @@ pub(crate) fn build_thread_safe_cols(
                     cache.push(buf);
                 }
                 (ColumnType::Factor, unsafe { libR_sys::INTEGER(sexp) as *const u8 as usize }, Some(cache), None)
-            } else if col.inherits("Date") && (r_type == Rtype::Doubles || r_type == Rtype::Integers) {
+            } else if cls & CLS_DATE != 0 && (r_type == Rtype::Doubles || r_type == Rtype::Integers) {
                 // Formatted in the worker rather than pre-encoded by R. The R
                 // side leaves Date alone whenever Date = "ISO8601"; the
                 // "epoch" mode is an unclass(), which is already free.
@@ -400,7 +593,7 @@ pub(crate) fn build_thread_safe_cols(
             } else if r_type == Rtype::Logicals {
                 (ColumnType::Bool, unsafe { libR_sys::LOGICAL(sexp) as *const u8 as usize }, None, None)
             } else if r_type == Rtype::Strings {
-                let is_json = col.inherits("json");
+                let is_json = splices_verbatim(cls, config);
                 let n = unsafe { sexp_len(sexp) };
 
                 // Fast path: if every element is pure ASCII then no encoding
@@ -417,7 +610,16 @@ pub(crate) fn build_thread_safe_cols(
                 // Non-ASCII columns fall through to the arena, because
                 // Rf_translateCharUTF8 allocates on R's vmax stack and so
                 // cannot be called from a worker.
-                if !is_json {
+                // `derived` takes the arena path below instead, which copies
+                // the bytes out while they are still alive. CharDirect stores
+                // a raw pointer into the STRSXP and the workers dereference it
+                // long after this iteration has dropped `owned`: with two
+                // POSIXt columns in one frame, the second format() call reused
+                // the first's storage and every value in the first column came
+                // out as the second's. Silently -- no crash, correct-looking
+                // JSON with the wrong timestamps. Reproducible under
+                // gctorture(TRUE); see tests/testthat/test-gctorture.R.
+                if !is_json && !derived {
                     let base = unsafe { libR_sys::STRING_PTR_RO(sexp) } as usize;
                     // This pass reads only CHARSXP bytes -- no allocation, no
                     // R state touched -- so it parallelises.
@@ -435,10 +637,11 @@ pub(crate) fn build_thread_safe_cols(
                     // ~5ms of a 12.6ms serialise, but that was 16 bytes built
                     // serially on the R thread; this is 4 bytes built in
                     // parallel.
-                    let meta: Vec<u32> = with_pool(|| {
-                        (0..n)
-                            .into_par_iter()
-                            .map(|i| unsafe {
+                    // Below this the pool costs more than the scan saves.
+                    // There was no threshold at all, so a three-element
+                    // character column fanned out over every worker.
+                    const MIN_PAR_CELLS: usize = 4096;
+                    let scan = |i: usize| -> u32 { unsafe {
                                 let cs = *(base as *const libR_sys::SEXP).add(i);
                                 if is_na_string(cs) {
                                     return CD_NA;
@@ -461,7 +664,68 @@ pub(crate) fn build_thread_safe_cols(
                                 // be a no-op for both, so no R allocation can
                                 // be needed. getCharCE is a pure bit read, so
                                 // this is safe off the R thread.
-                                if !bytes.is_ascii() && Rf_getCharCE(cs) != CE_UTF8 {
+                                // The encoding mark alone is not enough.
+                                // `Encoding<-` sets it without validating, so
+                                // a CE_UTF8 string can hold bytes that are not
+                                // UTF-8 -- which is why base R ships
+                                // validUTF8(). Admitting one here sent it
+                                // straight to the output, and because this
+                                // prepass runs on workers while STR_STATE is
+                                // thread-local, nothing marked STR_NON_ASCII,
+                                // so finish_json_string took the *unchecked*
+                                // from_utf8_unchecked branch on invalid bytes.
+                                // That is undefined behaviour, reachable from
+                                //   x <- rawToChar(as.raw(0xe9))
+                                //   Encoding(x) <- "UTF-8"
+                                //
+                                // The mark still has to be checked: latin1
+                                // bytes that happen to form valid UTF-8 must
+                                // be translated, not copied. Failing either
+                                // test routes the cell to the arena, where
+                                // charsxp_to_utf8_bytes sets STR_NON_ASCII and
+                                // the checked branch turns it into a clean R
+                                // error instead.
+                                // Rf_charIsUTF8 rather than the encoding
+                                // mark: readLines() and rawToChar() hand back
+                                // CE_NATIVE strings whose bytes are already
+                                // UTF-8 in a UTF-8 locale, and testing the
+                                // mark alone sent all of them to the arena --
+                                // 22.70 ms against 7.56 for the same 300,000
+                                // values and byte-identical output. It answers
+                                // from the header bits and the locale and does
+                                // not validate, so the from_utf8 check below
+                                // still has to run: rawToChar(as.raw(0xe9)) is
+                                // CE_NATIVE and is not valid UTF-8. latin1
+                                // still answers false, which is what keeps a
+                                // latin1 string that happens to be valid UTF-8
+                                // going through translation.
+                                if !bytes.is_ascii()
+                                    && (Rf_charIsUTF8(cs) == 0
+                                        || std::str::from_utf8(bytes).is_err())
+                                {
+                                    // A latin1 byte from 0xA0 up is its own
+                                    // code point, so widening it needs no
+                                    // table, no locale and no call into R --
+                                    // and that covers accented text, which is
+                                    // what latin1 columns are made of.
+                                    //
+                                    // 0x80..=0x9F is the exception and has to
+                                    // go to R. What R means by "latin1" there
+                                    // is not fixed: this box maps 0x80 to the
+                                    // euro sign and 0x9F to Y-diaeresis, which
+                                    // is CP1252, while a strict ISO-8859-1
+                                    // iconv maps them to the C1 controls. 27
+                                    // of the 256 bytes differ between the two,
+                                    // and a table baked in here would be wrong
+                                    // on whichever platform it did not match.
+                                    // Sending only those cells through
+                                    // Rf_translateCharUTF8 keeps the answer
+                                    // the platform's own.
+                                    if Rf_charIsLatin1(cs) != 0
+                                        && !bytes.iter().any(|&b| (0x80..0xA0).contains(&b))
+                                    {
+                                        return CD_LATIN1 | len as u32;
+                                    }
                                     return CD_XLATE;
                                 }
                                 let mut d = len as u32;
@@ -469,9 +733,12 @@ pub(crate) fn build_thread_safe_cols(
                                     d |= CD_ESC;
                                 }
                                 d
-                            })
-                            .collect()
-                    });
+                            } };
+                    let meta: Vec<u32> = if n >= MIN_PAR_CELLS && desired_threads() > 1 {
+                        with_pool(|| (0..n).into_par_iter().map(&scan).collect())
+                    } else {
+                        (0..n).map(&scan).collect()
+                    };
                     // Cells the workers cannot read are translated here, on
                     // the R thread, and only those cells. The column used to
                     // be abandoned wholesale: a single latin1 value among a
@@ -483,6 +750,11 @@ pub(crate) fn build_thread_safe_cols(
                         let mut bytes: Vec<u8> = Vec::new();
                         let mut offsets: Vec<(usize, usize)> = Vec::new();
                         let mut over = false;
+                        // Each translated string is R_alloc'd and would be held
+                        // to the end of the .Call; the mark is restored once
+                        // its bytes are safely in `bytes`, so the column costs
+                        // one string of vmax rather than all of them.
+                        let vmax = unsafe { vmaxget() };
                         for i in 0..n {
                             if meta[i] != CD_XLATE {
                                 continue;
@@ -503,6 +775,10 @@ pub(crate) fn build_thread_safe_cols(
                                 // never seen.
                                 None => bytes.extend_from_slice(b"null"),
                             }
+                            // The slice above is dead by here -- its bytes were
+                            // copied or escaped into `bytes` -- so the stack
+                            // can go back.
+                            unsafe { vmaxset(vmax) };
                             meta[i] = CD_ARENA | offsets.len() as u32;
                             offsets.push((start, bytes.len() - start));
                         }
@@ -521,6 +797,7 @@ pub(crate) fn build_thread_safe_cols(
                                 cached_levels: None,
                                 string_arena: arena,
                                 char_meta: Some(meta),
+                                arr_shape: None,
                             },
                         ));
                         continue;
@@ -554,9 +831,29 @@ pub(crate) fn build_thread_safe_cols(
                         }
                     }
                 }
+                // A `json` column is asJSON("json"), which returns its text
+                // verbatim and never collapses it into an array, so a
+                // length-one one must not gain brackets. In column-oriented
+                // output the column IS that value, so it is written whole.
+                // toJSON() errors on a longer json column in this mode, so
+                // there is nothing to match past one.
+                if is_json && config.df == DfMode::Columns && n == 1 {
+                    let len = bytes.len();
+                    out.push((key, ThreadSafeColumn {
+                        kind: ColumnType::JsonWhole,
+                        aux: 0,
+                        data_ptr: 0,
+                        len: 1,
+                        cached_levels: None,
+                        string_arena: Some(StringArena { bytes, offsets: vec![(0, len)] }),
+                        char_meta: None,
+                        arr_shape: None,
+                    }));
+                    continue;
+                }
                 let kind = if is_json { ColumnType::JsonRaw } else { ColumnType::Char };
                 (kind, 0, None, Some(StringArena { bytes, offsets }))
-            } else if col.inherits("sfc") {
+            } else if cls & CLS_SFC != 0 {
                 // A geometry column that is NOT the sf object's designated
                 // sf_column -- a second sfc column, or any sfc column of a
                 // frame that is not classed `sf`. jsonlite gives it a full
@@ -582,7 +879,7 @@ pub(crate) fn build_thread_safe_cols(
                     offsets.push((start, bytes.len() - start));
                 }
                 (ColumnType::JsonRaw, 0, None, Some(StringArena { bytes, offsets }))
-            } else if col.inherits("data.frame") {
+            } else if cls & CLS_DATA_FRAME != 0 {
                 // A data.frame-valued column (as produced by tidyr::nest) is a
                 // VECSXP whose elements are the nested frame's COLUMNS. Walking
                 // it as an ordinary list column therefore transposed the data:
@@ -590,49 +887,88 @@ pub(crate) fn build_thread_safe_cols(
                 // Emit one object per row of the nested frame instead.
                 let nested_rows = unsafe { get_df_nrows(sexp) };
                 let n_nested_cols = unsafe { sexp_len(sexp) };
-                let nested_names = unsafe { utf8_names(sexp, n_nested_cols) };
-                let mut bytes = Vec::with_capacity(_expected_rows * 64);
-                let mut offsets = Vec::with_capacity(_expected_rows);
-                for r in 0.._expected_rows {
-                    let start = bytes.len();
-                    if r >= nested_rows {
-                        bytes.extend_from_slice(b"null");
-                    } else {
-                        bytes.push(b'{');
-                        let mut first = true;
-                        for c in 0..n_nested_cols {
-                            let ncol = unsafe { libR_sys::VECTOR_ELT(sexp, c as isize) };
-                            if r >= unsafe { sexp_len(ncol) } {
-                                continue;
-                            }
-                            // Row-oriented output omits missing fields, so a
-                            // skipped value must not leave a separator behind.
-                            let mark = bytes.len();
-                            if !first {
-                                bytes.push(b',');
-                            }
-                            match nested_names.as_ref().and_then(|v| v.get(c)) {
-                                Some(nm) => {
-                                    escape_json_string_into(&mut bytes, nm);
+                // Described once, then written per row -- the same treatment
+                // the frame would get at top level. The previous loop called
+                // the per-cell writer, which reclassified the column and
+                // re-escaped its name for every row and had no idea what a
+                // Date or a matrix column was: `{"d":18262}` for a Date and
+                // `{"m":1}` for the row [1,3].
+                let nested_props = unsafe { escaped_keys(sexp, n_nested_cols) }
+                    .and_then(|nested_keys| {
+                        build_thread_safe_cols(
+                            sexp,
+                            nested_keys,
+                            usize::MAX,
+                            nested_rows,
+                            config,
+                            depth + 1,
+                        )
+                        .ok()
+                    });
+                // The nested frame inherits the enclosing orientation, which
+                // it used to ignore: toJSON() renders it column-oriented under
+                // `dataframe = "columns"` -- one object for the whole column,
+                // not one per row -- and as a bare array of values under
+                // `"values"`.
+                if config.df == DfMode::Columns {
+                    let mut w = JsonWriter::with_capacity(nested_rows * 16 + 32);
+                    match nested_props {
+                        Some(ref props) => {
+                            w.push_u8(b'{');
+                            let mut first = true;
+                            for (k, c) in props.iter() {
+                                if !first {
+                                    w.push_u8(b',');
                                 }
-                                None => bytes.extend_from_slice(b"\"\""),
-                            }
-                            bytes.push(b':');
-                            let before = bytes.len();
-                            unsafe { serialize_element_at_index(ncol, r, &mut bytes, config, 1); }
-                            if config.na == NaMode::Smart && bytes.len() == before + 4
-                                && &bytes[before..] == b"null"
-                            {
-                                bytes.truncate(mark);
-                            } else {
+                                w.push_key(k);
+                                w.push_u8(b'[');
+                                for r in 0..nested_rows {
+                                    if r > 0 {
+                                        w.push_u8(b',');
+                                    }
+                                    write_col_value(&mut w, r, c, config);
+                                }
+                                w.push_u8(b']');
                                 first = false;
                             }
+                            w.push_u8(b'}');
                         }
-                        bytes.push(b'}');
+                        None => w.push_bytes(b"null"),
                     }
-                    offsets.push((start, bytes.len() - start));
+                    let len = w.buf.len();
+                    let arena = StringArena { bytes: w.buf, offsets: vec![(0, len)] };
+                    out.push((key, ThreadSafeColumn {
+                        kind: ColumnType::JsonWhole,
+                        aux: 0,
+                        data_ptr: 0,
+                        len: 1,
+                        cached_levels: None,
+                        string_arena: Some(arena),
+                        char_meta: None,
+                        arr_shape: None,
+                    }));
+                    continue;
                 }
-                (ColumnType::JsonRaw, 0, None, Some(StringArena { bytes, offsets }))
+                let values = config.df == DfMode::Values;
+                let mut w = JsonWriter::with_capacity(_expected_rows * 64);
+                let mut offsets = Vec::with_capacity(_expected_rows);
+                for r in 0.._expected_rows {
+                    let start = w.buf.len();
+                    match nested_props {
+                        // A frame shorter than the enclosing one leaves the
+                        // remaining rows null, not an empty object.
+                        Some(ref props) if r < nested_rows => {
+                            if values {
+                                process_row_values(&mut w, r, props, config)
+                            } else {
+                                process_row_generic(&mut w, r, props, config)
+                            }
+                        }
+                        _ => w.push_bytes(b"null"),
+                    }
+                    offsets.push((start, w.buf.len() - start));
+                }
+                (ColumnType::JsonRaw, 0, None, Some(StringArena { bytes: w.buf, offsets }))
             } else if r_type == Rtype::List {
                 let n = unsafe { sexp_len(sexp) };
                 let mut bytes = Vec::with_capacity(n * 64);
@@ -640,7 +976,7 @@ pub(crate) fn build_thread_safe_cols(
                 for i in 0..n {
                     let item = unsafe { libR_sys::VECTOR_ELT(sexp, i as isize) };
                     let start = bytes.len();
-                    unsafe { serialize_sexp_to_json_buffer(item, &mut bytes, config, 0); }
+                    unsafe { serialize_sexp_to_json_buffer(item, &mut bytes, config, depth + 1); }
                     offsets.push((start, bytes.len() - start));
                 }
                 (ColumnType::JsonRaw, 0, None, Some(StringArena { bytes, offsets }))
@@ -651,12 +987,44 @@ pub(crate) fn build_thread_safe_cols(
             Some(ref a) => a.offsets.len(),
             None => unsafe { sexp_len(sexp) },
         };
-        out.push((key, ThreadSafeColumn { kind, aux, data_ptr: ptr, len: col_len, cached_levels, string_arena: arena, char_meta: None }));
+        out.push((key, ThreadSafeColumn { kind, aux, data_ptr: ptr, len: col_len, cached_levels, string_arena: arena, char_meta: None, arr_shape: None }));
     }
 
-    let rn_sexp = unsafe { libR_sys::Rf_getAttrib(df.get(), libR_sys::R_RowNamesSymbol) };
-    if !unsafe { is_default_rownames(rn_sexp) } {
-        let key = build_escaped_key_bytes(b"_row");
+    // The stored attribute, so automatic row names are recognised from the
+    // compact c(NA, -n) in constant time. Rf_getAttrib expands them to a 1..n
+    // sequence, which cost an O(n) scan and a 4n-byte materialisation here for
+    // every frame that has no row names to emit -- i.e. the common case.
+    // Rf_getAttrib rather than an ATTRIB walk: ATTRIB is not part of R's API
+    // (R-exts 6.21.6) and R CMD check reports it. This runs on the R thread,
+    // where getAttrib's header write is harmless, and its expansion of the
+    // compact form does not change what is_default_rownames answers.
+    let rn_sexp = unsafe { libR_sys::Rf_getAttrib(df, libR_sys::R_RowNamesSymbol) };
+    // toJSON()'s rule, established against it directly: `rownames = TRUE`
+    // always emits `_row` and renders row.names(x) by type -- an integer
+    // unquoted, a character quoted -- while the absent case emits it only when
+    // `is_default_rownames` says the names are informative. The two tests are
+    // different questions: c("7", "8") is omitted by default but printed, as
+    // strings, when asked for.
+    let force = config.rownames == ROWNAMES_ALWAYS;
+    let rn_informative = !unsafe { is_default_rownames(rn_sexp) };
+    if force && unsafe { is_compact_rownames(rn_sexp) } {
+        // Asked for row names that are not stored at all, so row.names()
+        // materialises 1..n, which renders as unquoted integers.
+        let key = Key::from_name(b"_row");
+        let mut bytes = Vec::with_capacity(_expected_rows * 8);
+        let mut offsets = Vec::with_capacity(_expected_rows);
+        for i in 0.._expected_rows {
+            let start = bytes.len();
+            let mut tmp = itoa::Buffer::new();
+            bytes.extend_from_slice(tmp.format(i + 1).as_bytes());
+            offsets.push((start, bytes.len() - start));
+        }
+        let rn_len = offsets.len();
+        out.push((key, ThreadSafeColumn { kind: ColumnType::JsonRaw, aux: 0, data_ptr: 0, len: rn_len, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }), char_meta: None, arr_shape: None }));
+        return Ok(out);
+    }
+    if config.rownames != ROWNAMES_NEVER && (force || rn_informative) {
+        let key = Key::from_name(b"_row");
         let n = unsafe { sexp_len(rn_sexp) };
         let mut bytes = Vec::with_capacity(n * 16);
         let mut offsets = Vec::with_capacity(n);
@@ -674,21 +1042,23 @@ pub(crate) fn build_thread_safe_cols(
                 } else { offsets.push((usize::MAX, 0)); }
             }
         } else if rn_type == libR_sys::SEXPTYPE::INTSXP as u32 {
+            // Unquoted, which is what toJSON() writes for integer row names.
+            // Only reachable under `rownames = TRUE`: without it, integer row
+            // names are among the ones jsonlite omits.
             let p = unsafe { libR_sys::INTEGER(rn_sexp) };
             for i in 0..n {
                 let v = unsafe { *p.add(i) };
                 if unsafe { is_na_int(v) } { offsets.push((usize::MAX, 0)); }
                 else {
-                    let mut tmp = itoa::Buffer::new();
-                    let s = tmp.format(v);
                     let start = bytes.len();
-                    escape_json_string_into(&mut bytes, s.as_bytes());
+                    let mut tmp = itoa::Buffer::new();
+                    bytes.extend_from_slice(tmp.format(v).as_bytes());
                     offsets.push((start, bytes.len() - start));
                 }
             }
         }
         let rn_len = offsets.len();
-        out.push((key, ThreadSafeColumn { kind: ColumnType::JsonRaw, aux: 0, data_ptr: 0, len: rn_len, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }), char_meta: None }));
+        out.push((key, ThreadSafeColumn { kind: ColumnType::JsonRaw, aux: 0, data_ptr: 0, len: rn_len, cached_levels: None, string_arena: Some(StringArena { bytes, offsets }), char_meta: None, arr_shape: None }));
     }
     Ok(out)
 }
@@ -712,6 +1082,8 @@ pub(crate) fn col_available(col: &ThreadSafeColumn, row: usize) -> bool {
             None => false,
         },
         ColumnType::Null => true,
+        // Rendered once for the whole column, so every row sees it.
+        ColumnType::JsonWhole => true,
         // `len` is the row count for a matrix column, not the element count.
         _ => row < col.len,
     }
@@ -756,7 +1128,8 @@ pub(crate) fn col_is_missing(col: &ThreadSafeColumn, row: usize) -> bool {
         },
         // A matrix cell is an array, which jsonlite always emits, so the key
         // is never dropped in row mode.
-        ColumnType::MatrixReal | ColumnType::MatrixInt => false,
+        ColumnType::MatrixReal | ColumnType::MatrixInt | ColumnType::MatrixBool
+        | ColumnType::ArrayDirect => false,
         ColumnType::CharDirect => match col.char_meta {
             Some(ref m) => m[row] == CD_NA,
             None => unsafe {
@@ -776,7 +1149,7 @@ pub(crate) fn col_is_missing(col: &ThreadSafeColumn, row: usize) -> bool {
             Some(ref a) => a.offsets[row].0 == usize::MAX,
             None => false,
         },
-        ColumnType::Null => false,
+        ColumnType::JsonWhole | ColumnType::Null => false,
     }
 }
 
@@ -816,6 +1189,21 @@ pub(crate) fn write_col_value(
                 let a = col.string_arena.as_ref().unwrap();
                 let (start, len) = a.offsets[(d & CD_LEN) as usize];
                 out.push_bytes(&a.bytes[start..start + len]);
+            } else if d & CD_LATIN1 != 0 {
+                // Widened here rather than by Rf_translateCharUTF8, which
+                // would have to run on the R thread, one iconv call per cell.
+                let cs = *(col.data_ptr as *const libR_sys::SEXP).add(row);
+                let src = slice::from_raw_parts(
+                    libR_sys::R_CHAR(cs) as *const u8,
+                    (d & CD_LEN) as usize,
+                );
+                // Taken out and put back so the escaper can borrow `buf`
+                // while this borrows `scratch`; a Vec swap, not a copy.
+                let mut wide = std::mem::take(&mut out.scratch);
+                wide.clear();
+                widen_latin1_into(&mut wide, src);
+                escape_json_string_into(&mut out.buf, &wide);
+                out.scratch = wide;
             } else {
                 let cs = *(col.data_ptr as *const libR_sys::SEXP).add(row);
                 let s = slice::from_raw_parts(
@@ -892,31 +1280,34 @@ pub(crate) fn write_col_value(
             let v = *(col.data_ptr as *const f64).add(row);
             write_time_cell(&mut out.buf, v, col.aux, config.na);
         },
+        // R stores a matrix column-major, so this row's values sit `nrow`
+        // apart. Walking a pointer by that stride removes the multiply and the
+        // address computation from what is now a very hot numeric kernel and
+        // gives LLVM one strided stream instead of an indexed load.
         ColumnType::MatrixReal => unsafe {
             let nrow = col.len;
             let ncol = col.aux as usize;
-            let p = col.data_ptr as *const f64;
+            let mut p = (col.data_ptr as *const f64).add(row);
             out.buf.reserve(ncol * 26 + 2);
             out.push_u8(b'[');
             for c in 0..ncol {
                 if c > 0 {
                     out.push_u8(b',');
                 }
-                // R stores a matrix column-major.
-                let v = *p.add(c * nrow + row);
-                if is_na_real(v) {
-                    if config.na == NaMode::String || config.na == NaMode::Smart {
-                        out.push_bytes(b"\"NA\"");
-                    } else {
-                        out.push_bytes(b"null");
-                    }
-                } else if v.is_finite() {
+                let v = *p;
+                p = p.add(nrow);
+                // Finite first, as every other numeric writer here does. This
+                // one asked is_na_real before is_finite, so an ordinary number
+                // paid for an NA test it could never satisfy.
+                if v.is_finite() {
                     out.push_f64_cfg(v, config);
                 } else if config.na == NaMode::String || config.na == NaMode::Smart {
                     if v == f64::INFINITY {
                         out.push_bytes(b"\"Inf\"");
                     } else if v == f64::NEG_INFINITY {
                         out.push_bytes(b"\"-Inf\"");
+                    } else if is_na_real(v) {
+                        out.push_bytes(b"\"NA\"");
                     } else {
                         out.push_bytes(b"\"NaN\"");
                     }
@@ -929,22 +1320,53 @@ pub(crate) fn write_col_value(
         ColumnType::MatrixInt => unsafe {
             let nrow = col.len;
             let ncol = col.aux as usize;
-            let p = col.data_ptr as *const i32;
+            let mut p = (col.data_ptr as *const i32).add(row);
             out.buf.reserve(ncol * 12 + 2);
             out.push_u8(b'[');
             for c in 0..ncol {
                 if c > 0 {
                     out.push_u8(b',');
                 }
-                let v = *p.add(c * nrow + row);
-                if is_na_int(v) {
-                    if config.na == NaMode::String || config.na == NaMode::Smart {
-                        out.push_bytes(b"\"NA\"");
-                    } else {
-                        out.push_bytes(b"null");
-                    }
-                } else {
+                let v = *p;
+                p = p.add(nrow);
+                if !is_na_int(v) {
                     out.push_i32(v);
+                } else if config.na == NaMode::String || config.na == NaMode::Smart {
+                    out.push_bytes(b"\"NA\"");
+                } else {
+                    out.push_bytes(b"null");
+                }
+            }
+            out.push_u8(b']');
+        },
+        ColumnType::ArrayDirect => unsafe {
+            let shape = match col.arr_shape {
+                Some(ref v) => &v[..],
+                None => {
+                    out.push_bytes(b"null");
+                    return;
+                }
+            };
+            write_arr_num_slice(&mut out.buf, col.data_ptr, col.aux, shape, 0, row, config);
+        },
+        ColumnType::MatrixBool => unsafe {
+            let nrow = col.len;
+            let ncol = col.aux as usize;
+            let mut p = (col.data_ptr as *const i32).add(row);
+            out.buf.reserve(ncol * 6 + 2);
+            out.push_u8(b'[');
+            for c in 0..ncol {
+                if c > 0 {
+                    out.push_u8(b',');
+                }
+                let v = *p;
+                p = p.add(nrow);
+                if !is_na_int(v) {
+                    out.push_bool(v != 0);
+                } else if config.na == NaMode::String {
+                    out.push_bytes(b"\"NA\"");
+                } else {
+                    out.push_bytes(b"null");
                 }
             }
             out.push_u8(b']');
@@ -981,6 +1403,13 @@ pub(crate) fn write_col_value(
                 }
             }
         },
+        // Only reachable if a whole-column blob were asked for cell by cell,
+        // which only the column-oriented writer produces and only it consumes.
+        ColumnType::JsonWhole => {
+            let a = col.string_arena.as_ref().unwrap();
+            let (start, len) = a.offsets[0];
+            out.push_bytes(&a.bytes[start..start + len]);
+        }
         ColumnType::Null => out.push_bytes(b"null"),
     }
 }
@@ -990,18 +1419,333 @@ pub(crate) fn write_col_value(
 /// Returns whether anything was written, so the caller can manage separators.
 /// The skip decision is taken before any byte is emitted.
 #[inline(always)]
+/// Writes `"key":value` for one cell, or nothing at all when row-oriented
+/// output would drop the key.
+///
+/// The default `na = "smart"` used to cost four dispatches on the column kind
+/// and two loads of the cell to write one number: `col_is_missing` calls
+/// `col_available` and then matches and loads, and `write_col_value` calls
+/// `col_available` again and matches and loads again. For the three kinds that
+/// dominate, the test and the write come off one load below, and the arms are
+/// the exact negation of `col_is_missing`'s -- `is_na_int` for Int and Bool,
+/// `!is_finite` for Real -- so the two cannot drift.
+///
+/// The key is still written only after the decision is made. Writing it first
+/// and rewinding would work, since the caller marks the buffer before calling,
+/// but the split exists because an earlier version pushed the key and then
+/// bailed out of the Factor and Char arms, leaving a dangling `"key":` in the
+/// output. Not reintroducing that shape.
 pub(crate) fn try_write_kv(
     out: &mut JsonWriter,
     row: usize,
-    key: &[u8],
+    key: &Key,
     col: &ThreadSafeColumn,
     config: SerializerConfig,
 ) -> bool {
-    if config.na == NaMode::Smart && col_is_missing(col, row) {
-        return false;
+    if config.na != NaMode::Smart {
+        // Nothing is ever omitted, so there is no decision to make.
+        out.push_key(key);
+        write_col_value(out, row, col, config);
+        return true;
     }
-    out.push_bytes(key);
-    write_col_value(out, row, col, config);
+    match col.kind {
+        ColumnType::Int => unsafe {
+            if row >= col.len {
+                return false;
+            }
+            let v = *(col.data_ptr as *const i32).add(row);
+            if is_na_int(v) {
+                return false;
+            }
+            out.push_key(key);
+            out.push_i32(v);
+        },
+        ColumnType::Real => unsafe {
+            if row >= col.len {
+                return false;
+            }
+            let v = *(col.data_ptr as *const f64).add(row);
+            if !v.is_finite() {
+                return false;
+            }
+            out.push_key(key);
+            out.push_f64_cfg(v, config);
+        },
+        ColumnType::Bool => unsafe {
+            if row >= col.len {
+                return false;
+            }
+            let v = *(col.data_ptr as *const i32).add(row);
+            if is_na_int(v) {
+                return false;
+            }
+            out.push_key(key);
+            out.push_bool(v != 0);
+        },
+        // Everything else keeps the split. A matrix or array cell is never
+        // missing, so its test is a constant; the string and date writers are
+        // long enough that fusing them would duplicate real logic.
+        _ => {
+            if col_is_missing(col, row) {
+                return false;
+            }
+            out.push_key(key);
+            write_col_value(out, row, col, config);
+        }
+    }
     true
 }
 
+// ------------------------------------------------------------------
+// TESTS
+// ------------------------------------------------------------------
+// `ThreadSafeColumn` is plain data over a raw pointer, so a column can be
+// built here over a `Vec` and the cell writers exercised with no R object
+// anywhere. The kinds that read a CHARSXP directly are the exception and are
+// left to the R-level suites; the arena-backed string kinds are covered, since
+// those read only the arena.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(na: NaMode) -> SerializerConfig {
+        SerializerConfig {
+            df: DfMode::Rows,
+            na,
+            null: NullMode::List,
+            factor: FactorMode::String,
+            auto_unbox: false,
+            digits: Some(4),
+            matrix_colmajor: false,
+            always_decimal: false,
+            signif: false,
+            json_verbatim: false,
+            rownames: ROWNAMES_REAL,
+        }
+    }
+
+    fn bare(kind: ColumnType, ptr: usize, len: usize) -> ThreadSafeColumn {
+        ThreadSafeColumn {
+            kind,
+            aux: 0,
+            data_ptr: ptr,
+            len,
+            cached_levels: None,
+            string_arena: None,
+            char_meta: None,
+            arr_shape: None,
+        }
+    }
+
+    fn cell(col: &ThreadSafeColumn, row: usize, c: SerializerConfig) -> String {
+        let mut w = JsonWriter::with_capacity(0);
+        write_col_value(&mut w, row, col, c);
+        String::from_utf8(w.buf).unwrap()
+    }
+
+    fn kv(col: &ThreadSafeColumn, row: usize, c: SerializerConfig) -> Option<String> {
+        let k = Key::from_name(b"x");
+        let mut w = JsonWriter::with_capacity(0);
+        if try_write_kv(&mut w, row, &k, col, c) {
+            Some(String::from_utf8(w.buf).unwrap())
+        } else {
+            assert!(w.buf.is_empty(), "an omitted field left bytes behind");
+            None
+        }
+    }
+
+    fn na_real() -> f64 {
+        f64::from_bits(0x7FF0_0000_0000_07A2)
+    }
+
+    #[test]
+    fn numeric_cells_spell_the_non_finite_values() {
+        let v = vec![1.5f64, na_real(), f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let col = bare(ColumnType::Real, v.as_ptr() as usize, v.len());
+        let want_null = ["1.5", "null", "null", "null", "null"];
+        let want_str = ["1.5", "\"NA\"", "\"NaN\"", "\"Inf\"", "\"-Inf\""];
+        for i in 0..v.len() {
+            assert_eq!(cell(&col, i, cfg(NaMode::Null)), want_null[i], "row {}", i);
+            assert_eq!(cell(&col, i, cfg(NaMode::String)), want_str[i], "row {}", i);
+        }
+    }
+
+    #[test]
+    fn integer_and_logical_cells() {
+        let iv = vec![7i32, i32::MIN, -3];
+        let ic = bare(ColumnType::Int, iv.as_ptr() as usize, iv.len());
+        assert_eq!(cell(&ic, 0, cfg(NaMode::Null)), "7");
+        assert_eq!(cell(&ic, 1, cfg(NaMode::Null)), "null");
+        assert_eq!(cell(&ic, 1, cfg(NaMode::String)), "\"NA\"");
+        assert_eq!(cell(&ic, 2, cfg(NaMode::Null)), "-3");
+
+        let lv = vec![1i32, 0, i32::MIN];
+        let lc = bare(ColumnType::Bool, lv.as_ptr() as usize, lv.len());
+        assert_eq!(cell(&lc, 0, cfg(NaMode::Null)), "true");
+        assert_eq!(cell(&lc, 1, cfg(NaMode::Null)), "false");
+        assert_eq!(cell(&lc, 2, cfg(NaMode::Null)), "null");
+        assert_eq!(cell(&lc, 2, cfg(NaMode::String)), "\"NA\"");
+    }
+
+    #[test]
+    fn the_fused_arms_agree_with_the_pair_they_replaced() {
+        // try_write_kv decides and writes from one load for Int, Real and
+        // Bool. The tests it fuses are meant to be the exact negation of
+        // col_is_missing's, so the fused answer must equal what the split pair
+        // would have produced for every row of every kind.
+        let dv = vec![1.5f64, na_real(), f64::NAN, f64::INFINITY, -0.0, 1e-9];
+        let iv = vec![7i32, i32::MIN, 0, -1];
+        let lv = vec![1i32, 0, i32::MIN];
+        let cols = [
+            bare(ColumnType::Real, dv.as_ptr() as usize, dv.len()),
+            bare(ColumnType::Int, iv.as_ptr() as usize, iv.len()),
+            bare(ColumnType::Bool, lv.as_ptr() as usize, lv.len()),
+        ];
+        for col in &cols {
+            for na in [NaMode::Null, NaMode::String, NaMode::Smart] {
+                let c = cfg(na);
+                for row in 0..col.len {
+                    let fused = kv(col, row, c);
+                    // What the split pair would have done.
+                    let split = if na == NaMode::Smart && col_is_missing(col, row) {
+                        None
+                    } else {
+                        let k = Key::from_name(b"x");
+                        let mut w = JsonWriter::with_capacity(0);
+                        w.push_key(&k);
+                        write_col_value(&mut w, row, col, c);
+                        Some(String::from_utf8(w.buf).unwrap())
+                    };
+                    assert_eq!(fused, split, "kind {:?} row {} na {:?}", col.kind, row, na);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_past_the_end_is_never_read() {
+        // A frame built with structure() can declare more rows than a column
+        // holds. Reading past the end used to serialise adjacent heap bytes.
+        let v = vec![1.5f64];
+        let col = bare(ColumnType::Real, v.as_ptr() as usize, 1);
+        assert_eq!(cell(&col, 5, cfg(NaMode::Null)), "null");
+        assert_eq!(kv(&col, 5, cfg(NaMode::Smart)), None);
+        assert!(col_is_missing(&col, 5));
+        assert!(!col_available(&col, 5));
+    }
+
+    #[test]
+    fn matrix_cells_walk_the_column_major_stride() {
+        // Three rows, two matrix columns: R stores them column-major, so row 1
+        // is elements 1 and 4.
+        let m = vec![1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut col = bare(ColumnType::MatrixReal, m.as_ptr() as usize, 3);
+        col.aux = 2;
+        assert_eq!(cell(&col, 0, cfg(NaMode::Null)), "[1,4]");
+        assert_eq!(cell(&col, 1, cfg(NaMode::Null)), "[2,5]");
+        assert_eq!(cell(&col, 2, cfg(NaMode::Null)), "[3,6]");
+        // Never missing: an array is always emitted, so the key stays.
+        assert!(!col_is_missing(&col, 0));
+
+        let mi = vec![1i32, 2, 3, i32::MIN, 5, 6];
+        let mut ic = bare(ColumnType::MatrixInt, mi.as_ptr() as usize, 3);
+        ic.aux = 2;
+        assert_eq!(cell(&ic, 0, cfg(NaMode::Null)), "[1,null]");
+        assert_eq!(cell(&ic, 0, cfg(NaMode::String)), "[1,\"NA\"]");
+
+        let ml = vec![1i32, 0, i32::MIN, 1, 0, 1];
+        let mut lc = bare(ColumnType::MatrixBool, ml.as_ptr() as usize, 3);
+        lc.aux = 2;
+        assert_eq!(cell(&lc, 0, cfg(NaMode::Null)), "[true,true]");
+        assert_eq!(cell(&lc, 2, cfg(NaMode::Null)), "[null,true]");
+    }
+
+    #[test]
+    fn array_cells_nest_over_the_trailing_dimensions() {
+        // A 2 x 3 x 2 double array: shape carries the dimensions after the row
+        // one, then their strides.
+        let a: Vec<f64> = (1..=12).map(|i| i as f64).collect();
+        let mut col = bare(ColumnType::ArrayDirect, a.as_ptr() as usize, 2);
+        col.aux = ARR_REAL;
+        col.arr_shape = Some(vec![3usize, 2, 2, 6].into_boxed_slice());
+        // Row 0 takes elements 0, 2, 4 (j) crossed with 0, 6 (k).
+        assert_eq!(cell(&col, 0, cfg(NaMode::Null)), "[[1,7],[3,9],[5,11]]");
+        assert_eq!(cell(&col, 1, cfg(NaMode::Null)), "[[2,8],[4,10],[6,12]]");
+        assert!(!col_is_missing(&col, 0));
+    }
+
+    #[test]
+    fn arena_backed_strings_come_out_verbatim() {
+        // Char and JsonRaw read only the arena, so no CHARSXP is involved.
+        let arena = StringArena {
+            bytes: b"\"a\"\"bb\"null".to_vec(),
+            offsets: vec![(0, 3), (3, 4), (usize::MAX, 0), (7, 4)],
+        };
+        let mut col = bare(ColumnType::Char, 0, 4);
+        col.string_arena = Some(arena);
+        assert_eq!(cell(&col, 0, cfg(NaMode::Null)), "\"a\"");
+        assert_eq!(cell(&col, 1, cfg(NaMode::Null)), "\"bb\"");
+        assert_eq!(cell(&col, 2, cfg(NaMode::Null)), "null");
+        assert_eq!(cell(&col, 2, cfg(NaMode::String)), "\"NA\"");
+        assert!(col_is_missing(&col, 2));
+        assert!(!col_is_missing(&col, 0));
+    }
+
+    #[test]
+    fn a_factor_reads_its_pre_escaped_levels() {
+        let codes = vec![1i32, 2, i32::MIN, 0, 99];
+        let mut col = bare(ColumnType::Factor, codes.as_ptr() as usize, codes.len());
+        col.cached_levels = Some(vec![b"\"a\"".to_vec(), b"\"b\"".to_vec()]);
+        assert_eq!(cell(&col, 0, cfg(NaMode::Null)), "\"a\"");
+        assert_eq!(cell(&col, 1, cfg(NaMode::Null)), "\"b\"");
+        assert_eq!(cell(&col, 2, cfg(NaMode::Null)), "null");
+        // A code of zero or past the levels is missing, not a panic.
+        assert_eq!(cell(&col, 3, cfg(NaMode::Null)), "null");
+        assert_eq!(cell(&col, 4, cfg(NaMode::Null)), "null");
+        assert!(col_is_missing(&col, 2));
+        assert!(col_is_missing(&col, 3));
+    }
+
+    #[test]
+    fn a_row_writer_never_leaves_a_dangling_key() {
+        // The split between deciding and writing exists because an earlier
+        // version pushed the key and then bailed out of an arm. Whatever is
+        // written must be a complete object.
+        let dv = vec![1.5f64, na_real()];
+        let col = bare(ColumnType::Real, dv.as_ptr() as usize, dv.len());
+        let props = vec![(Key::from_name(b"a"), col)];
+        for na in [NaMode::Null, NaMode::String, NaMode::Smart] {
+            for row in 0..2 {
+                let mut w = JsonWriter::with_capacity(0);
+                process_row_generic(&mut w, row, &props, cfg(na));
+                let s = String::from_utf8(w.buf).unwrap();
+                assert!(s.starts_with('{') && s.ends_with('}'), "{:?}", s);
+                assert!(!s.contains(":}"), "dangling key in {:?}", s);
+                assert!(!s.contains(",}"), "dangling separator in {:?}", s);
+            }
+        }
+        // Smart drops the whole field, leaving an empty object.
+        let mut w = JsonWriter::with_capacity(0);
+        process_row_generic(&mut w, 1, &props, cfg(NaMode::Smart));
+        assert_eq!(String::from_utf8(w.buf).unwrap(), "{}");
+    }
+
+    #[test]
+    fn values_rows_drop_the_keys_but_keep_the_positions() {
+        let dv = vec![1.5f64, na_real()];
+        let iv = vec![7i32, 8];
+        let props = vec![
+            (Key::from_name(b"a"), bare(ColumnType::Real, dv.as_ptr() as usize, 2)),
+            (Key::from_name(b"b"), bare(ColumnType::Int, iv.as_ptr() as usize, 2)),
+        ];
+        let mut w = JsonWriter::with_capacity(0);
+        process_row_values(&mut w, 0, &props, cfg(NaMode::Null));
+        assert_eq!(String::from_utf8(w.buf).unwrap(), "[1.5,7]");
+        // A missing value still occupies its position, or the array would
+        // stop lining up with the columns.
+        let mut w = JsonWriter::with_capacity(0);
+        process_row_values(&mut w, 1, &props, cfg(NaMode::Null));
+        assert_eq!(String::from_utf8(w.buf).unwrap(), "[null,8]");
+    }
+}

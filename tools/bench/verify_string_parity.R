@@ -11,15 +11,25 @@
 suppressMessages({library(fastgeojson); library(jsonlite)})
 
 fails <- 0L
-cmp <- function(x, label, ...) {
-  want <- as.character(toJSON(x, ...))
-  got  <- as.character(as_json(x, ...))
+cmp <- function(x, label, ..., .quiet = FALSE) {
+  # Compared and reported as BYTES. Some of the encoding cases below produce
+  # strings R cannot print or substr() in this locale, and reporting them as
+  # text made the verifier itself the thing that failed.
+  raw_of <- function(e) tryCatch(charToRaw(as.character(e())),
+                                 error = function(c) charToRaw(paste("ERR:", conditionMessage(c))))
+  want <- raw_of(function() toJSON(x, ...))
+  got  <- raw_of(function() as_json(x, ...))
   if (identical(want, got)) {
-    cat(sprintf("  PASS  %-50s\n", label))
+    if (!.quiet) cat(sprintf("  PASS  %-50s\n", label))
   } else {
     fails <<- fails + 1L
-    cat(sprintf("  FAIL  %-50s\n        R   : %s\n        rust: %s\n",
-                label, substr(want, 1, 200), substr(got, 1, 200)))
+    n <- min(length(want), length(got))
+    i <- which(want[seq_len(n)] != got[seq_len(n)])[1]
+    cat(sprintf("  FAIL  %-50s\n        first differing byte: %s\n        R   : %s\n        rust: %s\n",
+                label,
+                if (is.na(i)) sprintf("(length %d vs %d)", length(want), length(got)) else as.character(i),
+                paste(format(utils::head(want, 60)), collapse = " "),
+                paste(format(utils::head(got, 60)), collapse = " ")))
   }
 }
 
@@ -106,6 +116,133 @@ cat("  PASS  identical at 1, 2, 8 and automatic threads\n")
 bigu <- big
 bigu$a[1e5] <- lat
 cmp(bigu, "200k rows with one latin1 cell (arena fallback)")
+
+cat("\n== the json class: spliced only when json_verbatim says so ==\n")
+# `json_verbatim = FALSE` is the default, and it exists so that a string
+# carrying the `json` class is escaped like the string it is rather than
+# spliced into the document. That was honoured in R, and so only for the
+# outermost object: a json value nested anywhere was spliced whatever the
+# setting, which lets a string decide the shape of the document around it.
+#
+# The injection case below is the point of the argument. With the class
+# applied to "1,\"injected\":true", splicing turns {"v":[...]} into an object
+# with a second key.
+jv <- structure('{"a":1}', class = "json")
+inj <- structure('1,"injected":true', class = "json")
+jdf <- data.frame(i = 1L); jdf$j <- jv
+for (v in c(FALSE, TRUE)) {
+  for (dfm in c("rows", "columns", "values")) {
+    cmp(jdf, sprintf("json column, %s, json_verbatim = %s", dfm, v),
+        json_verbatim = v, dataframe = dfm)
+    cmp(list(z = jdf), sprintf("json column nested, %s, json_verbatim = %s", dfm, v),
+        json_verbatim = v, dataframe = dfm)
+    cmp(list(x = jv), sprintf("json in a list, %s, json_verbatim = %s", dfm, v),
+        json_verbatim = v, dataframe = dfm)
+    cmp(list(v = inj), sprintf("injection, %s, json_verbatim = %s", dfm, v),
+        json_verbatim = v, dataframe = dfm)
+  }
+  cmp(jv, sprintf("json at top level, json_verbatim = %s", v), json_verbatim = v)
+  cmp(list(a = list(b = jv)), sprintf("json two deep, json_verbatim = %s", v),
+      json_verbatim = v)
+}
+cmp(jv, "json at top level, default")
+cmp(list(x = jv), "json in a list, default")
+cmp(list(v = inj), "injection, default")
+cmp(list(a = list(b = inj)), "injection two deep, default")
+
+cat("\n== our own pre-rendered JSON is always spliced ==\n")
+# .prep() renders mongo dates, mongo binaries, complex rows and raw = "js"
+# itself and marks them so the writer splices them. They used to carry the
+# `json` class too, so turning the user's splicing off turned ours off with it
+# and a mongo timestamp came out quoted -- 21 of jsonlite's own tests.
+ts <- as.POSIXct(c("2020-01-01 10:00:00", NA), tz = "UTC")
+rw <- as.raw(c(98, 108, 97))
+cx <- complex(real = c(1, NA), imaginary = c(2, 3))
+for (v in c(FALSE, TRUE)) {
+  cmp(ts, sprintf("POSIXt = mongo, json_verbatim = %s", v), POSIXt = "mongo", json_verbatim = v)
+  cmp(data.frame(t = ts), sprintf("mongo in a frame, json_verbatim = %s", v),
+      POSIXt = "mongo", json_verbatim = v)
+  cmp(list(t = ts), sprintf("mongo nested, json_verbatim = %s", v),
+      POSIXt = "mongo", json_verbatim = v)
+  cmp(rw, sprintf("raw = mongo, json_verbatim = %s", v), raw = "mongo", json_verbatim = v)
+  cmp(list(r = rw), sprintf("raw = js, json_verbatim = %s", v), raw = "js", json_verbatim = v)
+  cmp(data.frame(c = cx), sprintf("complex = list, json_verbatim = %s", v),
+      complex = "list", json_verbatim = v)
+}
+
+
+cat("\n== encodings: which cells the workers can read for themselves ==\n")
+# A character cell is escaped straight out of R's CHARSXP by the workers
+# unless it needs Rf_translateCharUTF8, which allocates on R's vmax stack and
+# so has to run on the R thread. Two things decide that, and both were decided
+# wrongly.
+#
+# 1. The test was `Rf_getCharCE(cs) == CE_UTF8`. readLines() and rawToChar()
+#    return CE_NATIVE strings whose bytes are already UTF-8 in a UTF-8 locale,
+#    so every one of them took the serial path. Rf_charIsUTF8 is the right
+#    question and R 4.5.0 added it for exactly this.
+#
+# 2. latin1 went to R one cell at a time, at 815 ms per 300,000 values. A byte
+#    from 0xA0 up is its own code point, so the workers widen those
+#    themselves. 0x80..0x9F cannot be done here: R renders it as CP1252 on
+#    Windows and a strict ISO-8859-1 iconv renders it as the C1 controls, 27
+#    of the 256 bytes disagreeing, so those cells still go to R and get the
+#    platform's own answer.
+#
+# Every single byte is checked, because a conversion table baked into the fast
+# path would be wrong on whichever platform it did not match, and checking one
+# accented letter would never have found it.
+enc_as <- function(v, e) { x <- v; Encoding(x) <- rep(e, length(x)); x }
+byte_str <- function(b) rawToChar(as.raw(b))
+
+n_before <- fails
+for (b in 1:255) {
+  cmp(data.frame(x = enc_as(byte_str(b), "latin1"), stringsAsFactors = FALSE),
+      sprintf("latin1 byte %d", b), .quiet = TRUE)
+}
+cat(sprintf("  %-5s %-50s\n", if (fails == n_before) "PASS" else "FAIL",
+            "all 255 latin1 bytes, one at a time"))
+
+allb <- enc_as(vapply(1:255, byte_str, ""), "latin1")
+cmp(data.frame(x = allb, stringsAsFactors = FALSE), "latin1, all 255 in one column")
+cmp(data.frame(x = enc_as(rawToChar(as.raw(1:255)), "latin1"), stringsAsFactors = FALSE),
+    "latin1, all 255 in one string")
+cmp(data.frame(x = enc_as(rawToChar(as.raw(160:255)), "latin1"), stringsAsFactors = FALSE),
+    "latin1, only the unambiguous range")
+cmp(data.frame(x = enc_as(rawToChar(as.raw(128:159)), "latin1"), stringsAsFactors = FALSE),
+    "latin1, only the ambiguous range")
+cmp(data.frame(x = enc_as(rawToChar(as.raw(c(200, 130, 201))), "latin1"), stringsAsFactors = FALSE),
+    "latin1, one ambiguous byte among safe ones")
+cmp(data.frame(f = factor(allb)), "latin1 as a factor")
+cmp(list(s = allb), "latin1 in a list")
+cmp(setNames(as.list(1:3), enc_as(c("\xe9a", "\xfcb", "\xffc"), "latin1")), "latin1 names")
+for (dfm in c("rows", "columns", "values")) {
+  cmp(data.frame(x = allb, stringsAsFactors = FALSE),
+      paste("latin1, all bytes,", dfm), dataframe = dfm)
+}
+# High bytes next to every escape, including either side of the '<' '/' pair,
+# which is the one escaping rule that looks at more than one byte.
+tricky <- enc_as(c("<\xe9/", "\xe9</", "</\xe9", "a\\\xe9\"b", "\xe9\n\xe9",
+                   "<\xe9/x", "\xe9", "\xff\xfe", "\xa0/", "<\xa0"), "latin1")
+for (i in seq_along(tricky)) {
+  cmp(data.frame(x = tricky[i], stringsAsFactors = FALSE),
+      sprintf("latin1 escape adjacency %d", i))
+}
+cmp(data.frame(x = tricky, stringsAsFactors = FALSE), "latin1 escape adjacency, one column")
+
+# The native-encoding case, which is what readLines() hands back.
+vals <- c("café", "naïve", "Zürich", "日本語", "plain")
+for (e in c("unknown", "UTF-8")) {
+  cmp(data.frame(x = enc_as(vals, e), stringsAsFactors = FALSE), paste("non-ASCII marked", e))
+  cmp(enc_as(vals, e), paste("non-ASCII vector marked", e))
+  cmp(list(s = enc_as(vals, e)), paste("non-ASCII list marked", e))
+  cmp(data.frame(f = factor(enc_as(vals, e))), paste("non-ASCII factor marked", e))
+}
+tf <- tempfile(); writeLines(vals, tf); rl <- readLines(tf); unlink(tf)
+cmp(rl, "readLines output")
+cmp(data.frame(x = rl, stringsAsFactors = FALSE), "readLines in a frame")
+mixed <- c("plain", enc_as("café", "latin1"), enc_as("naïve", "unknown"), "more")
+cmp(data.frame(x = mixed, stringsAsFactors = FALSE), "three encodings in one column")
 
 cat(sprintf("\n%d failure(s)\n", fails))
 if (fails > 0) quit(status = 1)

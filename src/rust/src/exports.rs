@@ -9,13 +9,13 @@ use crate::*;
 // ------------------------------------------------------------------
 
 #[extendr]
-pub(crate) fn sf_geojson_str_impl(x: Robj, auto_unbox: bool, na: Robj, null: Robj, factor: Robj, digits: Robj, envelope: Robj, always_decimal: Robj, matrix_colmajor: Robj, as_bytes: Robj) -> Result<Robj> {
+pub(crate) fn sf_geojson_str_impl(x: Robj, auto_unbox: bool, na: Robj, null: Robj, factor: Robj, digits: Robj, envelope: Robj, always_decimal: Robj, matrix_colmajor: Robj, rownames: Robj, json_verbatim: Robj, as_bytes: Robj) -> Result<Robj> {
     str_state_reset();
-    let rr = catch_unwind(AssertUnwindSafe(|| sf_geojson_str_impl_inner(x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor, as_bytes)));
+    let rr = catch_unwind(AssertUnwindSafe(|| sf_geojson_str_impl_inner(x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor, rownames, json_verbatim, as_bytes)));
     match rr { Ok(r) => r, Err(p) => rerr(format!("Internal panic: {}", panic_message(p))), }
 }
 
-pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, null: Robj, factor: Robj, digits: Robj, envelope: Robj, always_decimal: Robj, matrix_colmajor: Robj, as_bytes: Robj) -> Result<Robj> {
+pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, null: Robj, factor: Robj, digits: Robj, envelope: Robj, always_decimal: Robj, matrix_colmajor: Robj, rownames: Robj, json_verbatim: Robj, as_bytes: Robj) -> Result<Robj> {
     // "geojson" wraps the features in a FeatureCollection; "features"
     // returns the bare array, which is jsonlite's sf = "features".
     let wrap_fc = parse_r_string_arg(envelope, "geojson") != "features";
@@ -74,17 +74,32 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
     let factor_val = parse_r_string_arg(factor, "string");
     let factor_mode = if factor_val == "integer" { FactorMode::Integer } else { FactorMode::String };
 
+    // 0 = FALSE, 1 = not given, 2 = TRUE; see SerializerConfig::rownames.
+    let json_verbatim_flag = json_verbatim.as_bool().unwrap_or(false);
+    let rownames_flag = rownames
+        .as_integer()
+        .or_else(|| rownames.as_real().map(|f| f as i32))
+        .unwrap_or(ROWNAMES_REAL as i32)
+        .clamp(0, 2) as u8;
+    let signif_flag = parse_signif_arg(&digits);
     let digits_opt = parse_digits_arg(digits);
     let always_decimal_flag = always_decimal.as_bool().unwrap_or(false);
     let matrix_colmajor_flag = matrix_colmajor.as_bool().unwrap_or(false);
-    let config = SerializerConfig { df: DfMode::Rows, na: na_mode, null: null_mode, factor: factor_mode, auto_unbox, digits: digits_opt, always_decimal: always_decimal_flag, matrix_colmajor: matrix_colmajor_flag };
+    let config = SerializerConfig { df: DfMode::Rows, na: na_mode, null: null_mode, factor: factor_mode, auto_unbox, digits: digits_opt, always_decimal: always_decimal_flag, matrix_colmajor: matrix_colmajor_flag, signif: signif_flag, rownames: rownames_flag, json_verbatim: json_verbatim_flag };
 
-    let mut ph = PhaseTimer::new(&format!(
+    let mut ph = PhaseTimer::new(format_args!(
         "sf {} features, {} property cols, {} workers",
         n_rows, colnames.len().saturating_sub(1), desired_threads()
     ));
-    let props = build_thread_safe_cols(&df, &colnames, geom_idx, n_rows, config)?;
+    // The sf path needs the plain names too, to find the geometry column, so
+    // it is the one caller that builds both.
+    let keys: Vec<Key> = colnames.iter().map(|n| Key::from_name(n)).collect();
+    let props = build_thread_safe_cols(unsafe { x.get() }, keys, geom_idx, n_rows, config, 0)?;
     ph.lap("build columns");
+    // Between phases, on the R thread: the pooled regions below cannot be
+    // interrupted from inside, so this is where a Ctrl-C during a long run
+    // gets noticed.
+    if interrupt_pending() { return rerr(interrupted_msg()); }
     
     // A polygon feature can be hundreds of times the work of a point, so size
     // the chunks by sampled geometry cost plus the property columns.
@@ -100,7 +115,8 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
     // serial phase of any size on this path: 30.15 ms on one worker and
     // 32.98 ms on 32, while serialization scaled 11.9x over the same range.
     let geom_ptr = geom_col as usize;
-    let mut chunk_geoms: Vec<(usize, usize, usize, ChunkGeoms)> = with_pool(|| {
+    let par = ranges.len() > 1 && desired_threads() > 1;
+    let mut chunk_geoms: Vec<(usize, usize, usize, ChunkGeoms)> = with_pool_if(par, || {
         ranges
             .par_iter()
             .map(|(id, start, end)| {
@@ -118,34 +134,68 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
     // Anything the workers could not describe from pure reads is finished
     // here, on the R thread. For sf's own objects that is nothing.
     for (_, start, _, cg) in chunk_geoms.iter_mut() {
-        unsafe { finish_pending_geoms(cg, geom_col, *start, config) };
+        unsafe { finish_pending_geoms(cg, geom_col, sfc_type, *start, config) };
     }
 
-    // One descriptor set for the whole column, so serialization can choose
-    // its own boundaries rather than inheriting extraction's.
-    let (batch, geoms) = merge_chunk_geoms(chunk_geoms);
     ph.lap("extract geometry");
 
-    // Now that the sizes are known, split the rows by the work they actually
-    // carry. Equal-row chunks left a layer of many small geometries and a few
-    // large ones scaling 1.6x where uniform geometry scaled 15.9x.
-    let work: Vec<usize> = geoms.iter().map(|g| geom_ordinates(g, &batch) + prop_work).collect();
-    let wranges = weighted_ranges(&work, num_chunks);
-    // Bytes per unit of work, from the same figures the flat estimate used.
+    // Split each chunk's rows by the work they carry, using that chunk's own
+    // descriptors. Equal-row boundaries left a layer of many small geometries
+    // and a few large ones scaling 1.6x where uniform geometry scaled 15.9x.
+    //
+    // The split is done *within* each extraction chunk rather than over one
+    // merged descriptor array. Merging existed only so this pass could pick
+    // its own boundaries, and it cost a serial 32 MB copy of the descriptors
+    // for a million features plus a second serial pass to build the work
+    // vector: `extract geometry` measured 17.1 ms on 32 workers against
+    // 21.6 ms on one, i.e. almost entirely serial. A chunk already owns a
+    // contiguous row range, so sub-ranges of it need no rebasing at all, and
+    // a chunk holding one enormous geometry still splits it out.
     let bytes_per_work = 16usize;
+    // (chunk index, local start, local end, work in that sub-range)
+    let mut subs: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(num_chunks * 2);
+    for (ci, (_, _, _, cg)) in chunk_geoms.iter().enumerate() {
+        let w = &cg.work;
+        let total: usize = w.iter().sum::<usize>() + prop_work * w.len();
+        subs.push((ci, 0, w.len(), total));
+    }
+    // Re-split any sub-range carrying far more than its share, so a single
+    // heavy chunk cannot stall the pass.
+    let total_work: usize = subs.iter().map(|s| s.3).sum();
+    let target = (total_work / num_chunks.max(1)).max(1);
+    let mut plan: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(subs.len() * 2);
+    for (ci, ls, le, w) in subs {
+        if w <= target * 2 || le - ls < 2 {
+            plan.push((ci, ls, le, w));
+            continue;
+        }
+        let cw = &chunk_geoms[ci].3.work;
+        let want = (w / target).max(1).min(le - ls);
+        for (_, a, b) in weighted_ranges(&cw[ls..le], want) {
+            let (a, b) = (ls + a, ls + b);
+            let sub: usize = cw[a..b].iter().sum::<usize>() + prop_work * (b - a);
+            plan.push((ci, a, b, sub));
+        }
+    }
     ph.lap("weigh chunks");
 
-    let parts_res: Vec<PResult<(usize, Vec<u8>)>> = with_pool(|| wranges.par_iter().map(|(chunk_id, start, end)| {
-        let (chunk_id, start, end) = (*chunk_id, *start, *end);
+    let parts_res: Vec<PResult<(usize, Vec<u8>)>> = with_pool_if(plan.len() > 1 && desired_threads() > 1, || plan.par_iter().enumerate().map(|(seq, &(ci, ls, le, w))| {
         let rr = catch_unwind(AssertUnwindSafe(|| {
-            let chunk_work: usize = work[start..end].iter().sum();
-            let cap = (chunk_work * bytes_per_work + (end - start) * 128).clamp(256, 1 << 30);
-            let mut w = JsonWriter::with_capacity(cap);
-            for (local_i, row_i) in (start..end).enumerate() {
-                if local_i > 0 { w.push_u8(b','); }
-                process_feature_parallel(&mut w, row_i, &props, &geoms[row_i], &batch, config);
+            let (_, chunk_start, _, cg) = &chunk_geoms[ci];
+            let cap = (w * bytes_per_work + (le - ls) * 128).clamp(256, 1 << 30);
+            let mut writer = JsonWriter::with_capacity(cap);
+            for local_i in ls..le {
+                if local_i > ls { writer.push_u8(b','); }
+                process_feature_parallel(
+                    &mut writer,
+                    chunk_start + local_i,
+                    &props,
+                    &cg.geoms[local_i],
+                    &cg.batch,
+                    config,
+                );
             }
-            (chunk_id, w.buf)
+            (seq, writer.buf)
         }));
         match rr { Ok(v) => Ok(v), Err(p) => Err(format!("Worker panic: {}", panic_message(p))), }
     }).collect());
@@ -162,8 +212,13 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
         (b"[", b"]")
     };
     let (total, offs) = assembly_layout(prefix, &chunks, suffix);
-    if total > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", total)); }
 
+    // The 2 GB ceiling belongs to the character path alone. R Internals is
+    // explicit that long vectors cover raw but not strings -- "Elements of
+    // character vectors (CHARSXPs) remain limited to 2^31 - 1 bytes" -- and
+    // Rf_mkCharLenCE takes an int length. A RAWSXP has no such limit, so
+    // as_bytes = TRUE is checked below rather than here, where it was
+    // refusing output it could perfectly well have produced.
     if as_bytes.as_bool().unwrap_or(false) {
         let r = match assemble_into_raw(prefix, &chunks, &offs, suffix, total) {
             Ok(r) => r,
@@ -172,22 +227,25 @@ pub(crate) fn sf_geojson_str_impl_inner(x: Robj, auto_unbox: bool, na: Robj, nul
         ph.lap("assemble into R (raw)");
         return Ok(r);
     }
-    let final_out = assemble_into_vec(prefix, &chunks, &offs, suffix, total);
+    if total > i32::MAX as usize { return rerr(oversize(total)); }
+    let final_out = match assemble_into_vec(prefix, &chunks, &offs, suffix, total) {
+        Ok(v) => v,
+        Err(e) => return rerr(e),
+    };
     ph.lap("assemble chunks");
-    let result_str = match finish_json_string(final_out) {
+    let mut robj = match finish_json_string(final_out) {
         Ok(s) => s,
         Err(e) => return rerr(e),
     };
-    let mut robj = Robj::from(result_str);
     robj.set_class(&["geojson", "json"])?;
     ph.lap("copy into R");
     Ok(robj)
 }
 
 #[extendr]
-pub(crate) fn df_json_str_impl(x: Robj, auto_unbox: bool, dataframe: String, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, as_bytes: Robj) -> Result<Robj> {
+pub(crate) fn df_json_str_impl(x: Robj, auto_unbox: bool, dataframe: String, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, rownames: Robj, json_verbatim: Robj, as_bytes: Robj) -> Result<Robj> {
     str_state_reset();
-    let rr = catch_unwind(AssertUnwindSafe(|| df_json_str_impl_inner(x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor, as_bytes)));
+    let rr = catch_unwind(AssertUnwindSafe(|| df_json_str_impl_inner(x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor, rownames, json_verbatim, as_bytes)));
     match rr { Ok(r) => r, Err(p) => rerr(format!("Internal panic: {}", panic_message(p))), }
 }
 
@@ -217,16 +275,36 @@ pub(crate) fn profiling() -> bool {
     }
 }
 
+/// Writes to R's error stream rather than the process's.
+///
+/// R-exts 5.6 is explicit that compiled code must go through R's own
+/// channels: "For C++ code do not use `cout` or `cerr`" and the C equivalent
+/// is `REprintf`. Writing straight to fd 2 with `eprintln!` bypasses R's
+/// sink, its connection redirection and `capture.output()`, which is both a
+/// `R CMD check` finding and simply wrong for anyone trying to capture it.
+///
+/// The format string is `%s` with the text as an argument, never the text as
+/// a format string, so a `%` in a label cannot be read as a directive.
+fn reprint(msg: &str) {
+    if let Ok(c) = std::ffi::CString::new(msg) {
+        unsafe { libR_sys::REprintf(b"%s\0".as_ptr() as *const c_char, c.as_ptr()) };
+    }
+}
+
 pub(crate) struct PhaseTimer {
     pub(crate) t: std::time::Instant,
     pub(crate) on: bool,
 }
 
 impl PhaseTimer {
-    pub(crate) fn new(what: &str) -> Self {
+    /// Takes `format_args!`, not a `String`, so the header costs nothing when
+    /// profiling is off. The call sites used to build it with `format!`
+    /// unconditionally, allocating on every serialization to describe a run
+    /// nobody was watching.
+    pub(crate) fn new(what: std::fmt::Arguments) -> Self {
         let on = profiling();
         if on {
-            eprintln!("fastgeojson: {}", what);
+            reprint(&format!("fastgeojson: {}\n", what));
         }
         PhaseTimer {
             t: std::time::Instant::now(),
@@ -237,17 +315,46 @@ impl PhaseTimer {
     pub(crate) fn lap(&mut self, label: &str) {
         if self.on {
             let now = std::time::Instant::now();
-            eprintln!(
-                "fastgeojson:   {:<20} {:>9.2} ms",
+            reprint(&format!(
+                "fastgeojson:   {:<20} {:>9.2} ms\n",
                 label,
                 (now - self.t).as_secs_f64() * 1000.0
-            );
+            ));
             self.t = now;
         }
     }
 }
 
 // ------------------------------------------------------------------
+/// Runs `f` in the worker pool, or directly when there is nothing to spread.
+///
+/// `with_pool` locks a mutex, clones an `Arc` and calls `install`, which
+/// injects a job from a foreign thread and blocks on a latch. That is a few
+/// microseconds, which is nothing against a 30 ms serialization and most of
+/// the cost of a ten-row one. Below about 6000 rows, 32 workers measured
+/// slower than one.
+#[inline]
+/// The message for output too large to be an R string.
+///
+/// Says what the limit is a limit ON, because the obvious next question is
+/// whether the whole call is impossible or only this form of the answer.
+fn oversize(total: usize) -> String {
+    format!(
+        "Result is {} bytes; an R character string is limited to {} (2 GB). \
+         Use as_bytes = TRUE to get the same output as a raw vector, which has no such limit.",
+        total,
+        i32::MAX
+    )
+}
+
+pub(crate) fn with_pool_if<R: Send>(parallel: bool, f: impl FnOnce() -> R + Send) -> R {
+    if parallel {
+        with_pool(f)
+    } else {
+        f()
+    }
+}
+
 /// Byte layout for `open` + `parts` joined by commas + `close`.
 ///
 /// Returns the total size and, per part, the offset it starts at.
@@ -337,6 +444,9 @@ pub(crate) unsafe fn assemble_into(
         }
     }
     let base = Dst(dst);
+    // Copied at full pool width. Bounding this to six tasks, on the theory
+    // that a pure copy saturates memory bandwidth early, measured slower on
+    // every shape tried -- 37.2 -> 39.0 ms on a million point features.
     with_pool(|| {
         parts
             .par_iter()
@@ -376,23 +486,48 @@ pub(crate) fn assemble_into_raw(
 }
 
 /// The same assembly into a fresh `Vec`, for the character path.
+/// The one allocation big enough to be worth asking about rather than
+/// assuming.
+///
+/// `Vec::with_capacity` calls `handle_alloc_error` when it cannot get the
+/// memory, which calls `abort()`. R-exts 5.6 forbids that absolutely: "Under
+/// no circumstances should your compiled code ever call abort or exit: these
+/// terminate the user's R process, quite possibly losing all unsaved work."
+/// And an abort does not unwind, so the `catch_unwind` at every entry point
+/// would not see it either. `try_reserve` (stable since 1.57, inside the 1.65
+/// MSRV) hands the failure back instead, and the caller turns it into an R
+/// condition the user can catch -- which is what the `as_bytes` path already
+/// gets for free from `Rf_allocVector`.
+pub(crate) fn try_buffer(total: usize) -> PResult<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(total).map_err(|_| {
+        format!(
+            "Could not allocate {} bytes for the result. \
+             as_bytes = TRUE allocates through R instead, which reports the \
+             shortfall as a catchable R error rather than failing here.",
+            total
+        )
+    })?;
+    Ok(out)
+}
+
 pub(crate) fn assemble_into_vec(
     prefix: &[u8],
     parts: &[Vec<u8>],
     offs: &[usize],
     suffix: &[u8],
     total: usize,
-) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::with_capacity(total);
+) -> PResult<Vec<u8>> {
+    let mut out: Vec<u8> = try_buffer(total)?;
     unsafe {
         assemble_into(out.as_mut_ptr(), total, prefix, parts, offs, suffix);
         // Every one of the `total` bytes was just written.
         out.set_len(total);
     }
-    out
+    Ok(out)
 }
 
-pub(crate) fn df_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: String, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, as_bytes: Robj) -> Result<Robj> {
+pub(crate) fn df_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: String, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, rownames: Robj, json_verbatim: Robj, as_bytes: Robj) -> Result<Robj> {
     if x.is_null() { let mut r = Robj::from("[]"); r.set_class(&["json"])?; return Ok(r); }
     if !x.inherits("data.frame") { return rerr("Not a data.frame"); }
 
@@ -408,16 +543,18 @@ pub(crate) fn df_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: Strin
         buf.push(b'[');
         for i in 0..n_rows { if i > 0 { buf.push(b','); } buf.extend_from_slice(b"{}"); }
         buf.push(b']');
-        let mut robj = Robj::from(match finish_json_string(buf) {
+        let mut robj = match finish_json_string(buf) {
             Ok(s) => s,
             Err(e) => return rerr(e),
-        });
+        };
         robj.set_class(&["json"])?;
         return Ok(robj);
     }
 
-    let df_list = x.as_list().ok_or_else(|| Error::Other("Invalid df structure".to_string()))?;
-    let colnames = unsafe { utf8_names(x.get(), n_cols) }
+    // Kept as a validity check: a data.frame that is not a VECSXP would make
+    // the column pointer below meaningless.
+    x.as_list().ok_or_else(|| Error::Other("Invalid df structure".to_string()))?;
+    let keys = unsafe { escaped_keys(x.get(), n_cols) }
         .ok_or_else(|| Error::Other("No names".to_string()))?;
     
     let df_mode = match dataframe.as_str() {
@@ -438,39 +575,37 @@ pub(crate) fn df_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: Strin
     let factor_val = parse_r_string_arg(factor, "string");
     let factor_mode = if factor_val == "integer" { FactorMode::Integer } else { FactorMode::String };
 
+    // 0 = FALSE, 1 = not given, 2 = TRUE; see SerializerConfig::rownames.
+    let json_verbatim_flag = json_verbatim.as_bool().unwrap_or(false);
+    let rownames_flag = rownames
+        .as_integer()
+        .or_else(|| rownames.as_real().map(|f| f as i32))
+        .unwrap_or(ROWNAMES_REAL as i32)
+        .clamp(0, 2) as u8;
+    let signif_flag = parse_signif_arg(&digits);
     let digits_opt = parse_digits_arg(digits);
     let always_decimal_flag = always_decimal.as_bool().unwrap_or(false);
     let matrix_colmajor_flag = matrix_colmajor.as_bool().unwrap_or(false);
-    let config = SerializerConfig { df: df_mode, na: na_mode, null: null_mode, factor: factor_mode, auto_unbox, digits: digits_opt, always_decimal: always_decimal_flag, matrix_colmajor: matrix_colmajor_flag };
+    let config = SerializerConfig { df: df_mode, na: na_mode, null: null_mode, factor: factor_mode, auto_unbox, digits: digits_opt, always_decimal: always_decimal_flag, matrix_colmajor: matrix_colmajor_flag, signif: signif_flag, rownames: rownames_flag, json_verbatim: json_verbatim_flag };
 
-    let mut ph = PhaseTimer::new(&format!(
+    let mut ph = PhaseTimer::new(format_args!(
         "data.frame {} rows x {} cols, {} workers",
         n_rows, n_cols, desired_threads()
     ));
-    let props = build_thread_safe_cols(&df_list, &colnames, usize::MAX, n_rows, config)?;
+    let props = build_thread_safe_cols(unsafe { x.get() }, keys, usize::MAX, n_rows, config, 0)?;
     ph.lap("build columns");
+    // Between phases, on the R thread: the pooled regions below cannot be
+    // interrupted from inside, so this is where a Ctrl-C during a long run
+    // gets noticed.
+    if interrupt_pending() { return rerr(interrupted_msg()); }
 
 	let final_out = if df_mode == DfMode::Columns {
-        let column_parts: Vec<PResult<Vec<u8>>> = with_pool(|| props.into_par_iter().map(|(key, col)| {
-            let mut w = JsonWriter::with_capacity(n_rows * 16);
-            w.push_bytes(&key);
-            w.push_u8(b'[');
-            for r in 0..n_rows {
-                if r > 0 { w.push_u8(b','); }
-                write_col_value(&mut w, r, &col, config);
-            }
-            w.push_u8(b']');
-            Ok(w.buf)
-        }).collect());
-
-        ph.lap("serialize (parallel)");
-        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(column_parts.len());
-        for part in column_parts {
-            match part { Ok(p) => chunks.push(p), Err(e) => return rerr(e), }
-        }
+        let chunks = match df_col_chunks(&props, n_rows, config, Some(&mut ph)) {
+            Ok(c) => c,
+            Err(e) => return rerr(e),
+        };
         let (total, offs) = assembly_layout(b"{", &chunks, b"}");
-        if total > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", total)); }
-
+        // Character path only; see the note at the geojson assembly.
         if as_bytes.as_bool().unwrap_or(false) {
             let r = match assemble_into_raw(b"{", &chunks, &offs, b"}", total) {
                 Ok(r) => r,
@@ -479,52 +614,23 @@ pub(crate) fn df_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: Strin
             ph.lap("assemble into R (raw)");
             return Ok(r);
         }
-        let out = assemble_into_vec(b"{", &chunks, &offs, b"}", total);
+        if total > i32::MAX as usize { return rerr(oversize(total)); }
+        let out = match assemble_into_vec(b"{", &chunks, &offs, b"}", total) {
+            Ok(v) => v,
+            Err(e) => return rerr(e),
+        };
         ph.lap("assemble columns");
         out
     } else {
         if n_rows == 0 { let mut r = Robj::from("[]"); r.set_class(&["json"])?; return Ok(r); }
-        // Row count alone is the wrong measure: a 2000-row x 200-column frame
-        // is more work than a 200000-row x 1-column one, but the old
-        // `n_rows < 10000` test put the first in a single chunk.
-        let row_work = estimate_row_work(&props);
-        let chunk_size = rows_per_chunk(n_rows, row_work);
-        // estimate_row_work is roughly a quarter of the bytes a row occupies,
-        // so this sizes each chunk buffer from the actual columns instead of a
-        // flat 128 bytes per row. Being 20x out in either direction costs
-        // either untouched pages or a realloc-and-copy of the whole chunk.
-        let est_row_bytes = (row_work * 8).clamp(16, 1 << 16);
-        ph.lap("plan chunks");
-        let num_chunks = (n_rows + chunk_size - 1) / chunk_size;
-        let ranges: Vec<(usize, usize, usize)> = (0..num_chunks).map(|id| (id, id * chunk_size, (id * chunk_size + chunk_size).min(n_rows))).collect();
-
-        let parts_res: Vec<PResult<(usize, Vec<u8>)>> = with_pool(|| ranges.into_par_iter().map(|(chunk_id, start, end)| {
-            let rr = catch_unwind(AssertUnwindSafe(|| {
-                let mut w = JsonWriter::with_capacity((end - start) * est_row_bytes);
-                for i in start..end {
-                    if i > start { w.push_u8(b','); }
-                    if df_mode == DfMode::Values {
-                        process_row_values(&mut w, i, &props, config);
-                    } else {
-                        process_row_generic(&mut w, i, &props, config);
-                    }
-                }
-                (chunk_id, w.buf)
-            }));
-            match rr { Ok(v) => Ok(v), Err(p) => Err(format!("Worker panic: {}", panic_message(p))), }
-        }).collect());
-
-        ph.lap("serialize (parallel)");
-        let mut parts: Vec<(usize, Vec<u8>)> = Vec::with_capacity(parts_res.len());
-        for r in parts_res { match r { Ok(v) => parts.push(v), Err(msg) => return rerr(msg), } }
-        parts.sort_by_key(|(id, _)| *id);
-
-        let chunks: Vec<Vec<u8>> = parts.into_iter().map(|(_, v)| v).collect();
+        let chunks = match df_row_chunks(&props, n_rows, estimate_row_work(&props), config, Some(&mut ph)) {
+            Ok(c) => c,
+            Err(e) => return rerr(e),
+        };
         let (total, offs) = assembly_layout(b"[", &chunks, b"]");
-        if total > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", total)); }
-
         // With as_bytes the destination is R's own vector, so the chunks are
-        // written into it directly and nothing is copied twice.
+        // written into it directly and nothing is copied twice -- and it is
+        // not subject to the character path's 2 GB ceiling.
         if as_bytes.as_bool().unwrap_or(false) {
             let r = match assemble_into_raw(b"[", &chunks, &offs, b"]", total) {
                 Ok(r) => r,
@@ -533,33 +639,53 @@ pub(crate) fn df_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: Strin
             ph.lap("assemble into R (raw)");
             return Ok(r);
         }
-        let out = assemble_into_vec(b"[", &chunks, &offs, b"]", total);
+        if total > i32::MAX as usize { return rerr(oversize(total)); }
+        let out = match assemble_into_vec(b"[", &chunks, &offs, b"]", total) {
+            Ok(v) => v,
+            Err(e) => return rerr(e),
+        };
         ph.lap("assemble chunks");
         out
     };
 
-    if final_out.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", final_out.len())); }
-    
     if as_bytes.as_bool().unwrap_or(false) {
         let r = match finish_json_raw(final_out) { Ok(r) => r, Err(e) => return rerr(e) };
         ph.lap("copy into R (raw)");
         return Ok(r);
     }
-    let result_str = match finish_json_string(final_out) {
+    if final_out.len() > i32::MAX as usize { return rerr(oversize(final_out.len())); }
+    let mut robj = match finish_json_string(final_out) {
         Ok(s) => s,
         Err(e) => return rerr(e),
     };
     ph.lap("utf8 finish");
-    let mut robj = Robj::from(result_str);
     robj.set_class(&["json"])?;
     ph.lap("copy into R");
     Ok(robj)
 }
 
 #[extendr]
-pub(crate) fn obj_json_str_impl(x: Robj, auto_unbox: bool, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, as_bytes: Robj) -> Result<Robj> {
+pub(crate) fn obj_json_str_impl(x: Robj, auto_unbox: bool, dataframe: String, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, rownames: Robj, json_verbatim: Robj, as_bytes: Robj) -> Result<Robj> {
+    // The other two entry points already convert a worker panic into an R
+    // error; this one called the recursive writer directly, so a panic --
+    // capacity overflow, a failed allocation, a slice bound -- would unwind
+    // across the C boundary into R.
     str_state_reset();
-    let est_size = unsafe { sexp_len(x.get()) } * 16 + 64;
+    let rr = catch_unwind(AssertUnwindSafe(|| {
+        obj_json_str_impl_inner(x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor, rownames, json_verbatim, as_bytes)
+    }));
+    match rr { Ok(r) => r, Err(p) => rerr(format!("Internal panic: {}", panic_message(p))) }
+}
+
+fn obj_json_str_impl_inner(x: Robj, auto_unbox: bool, dataframe: String, na: Robj, null: Robj, factor: Robj, digits: Robj, always_decimal: Robj, matrix_colmajor: Robj, rownames: Robj, json_verbatim: Robj, as_bytes: Robj) -> Result<Robj> {
+    // A modest reservation, left to Vec's growth from there. The previous
+    // formula, sexp_len(x) * 16 + 64, was wrong in intent -- sexp_len of a
+    // data frame is its column count, so a nested frame reserved 80 bytes for
+    // megabytes of output -- but replacing it with a recursive estimate of the
+    // real payload measured flat everywhere, including 34.5 MB of nested
+    // output (182.8 -> 181.4 ms). Doubling plus in-place realloc absorbs it,
+    // so there is nothing here worth computing.
+    let est_size = 4096;
     let mut w = JsonWriter::with_capacity(est_size);
     
     let na_val = parse_r_string_arg(na, "null");
@@ -575,22 +701,36 @@ pub(crate) fn obj_json_str_impl(x: Robj, auto_unbox: bool, na: Robj, null: Robj,
     let factor_val = parse_r_string_arg(factor, "string");
     let factor_mode = if factor_val == "integer" { FactorMode::Integer } else { FactorMode::String };
 
+    // 0 = FALSE, 1 = not given, 2 = TRUE; see SerializerConfig::rownames.
+    let json_verbatim_flag = json_verbatim.as_bool().unwrap_or(false);
+    let rownames_flag = rownames
+        .as_integer()
+        .or_else(|| rownames.as_real().map(|f| f as i32))
+        .unwrap_or(ROWNAMES_REAL as i32)
+        .clamp(0, 2) as u8;
+    let signif_flag = parse_signif_arg(&digits);
     let digits_opt = parse_digits_arg(digits);
     let always_decimal_flag = always_decimal.as_bool().unwrap_or(false);
     let matrix_colmajor_flag = matrix_colmajor.as_bool().unwrap_or(false);
-    let config = SerializerConfig { df: DfMode::Rows, na: na_mode, null: null_mode, factor: factor_mode, auto_unbox, digits: digits_opt, always_decimal: always_decimal_flag, matrix_colmajor: matrix_colmajor_flag };
+    // `dataframe` never used to reach here, so a data.frame anywhere below the
+    // top level was always rendered row-oriented: as_json(list(d = df),
+    // dataframe = "columns") silently ignored the argument.
+    let df_mode = match dataframe.as_str() {
+        "columns" => DfMode::Columns,
+        "values" => DfMode::Values,
+        _ => DfMode::Rows,
+    };
+    let config = SerializerConfig { df: df_mode, na: na_mode, null: null_mode, factor: factor_mode, auto_unbox, digits: digits_opt, always_decimal: always_decimal_flag, matrix_colmajor: matrix_colmajor_flag, signif: signif_flag, rownames: rownames_flag, json_verbatim: json_verbatim_flag };
 
     unsafe { serialize_sexp_to_json_buffer(x.get(), &mut w.buf, config, 0); }
-    if w.buf.len() > i32::MAX as usize { return rerr(format!("Size {} exceeds 2GB limit", w.buf.len())); }
-    
     if as_bytes.as_bool().unwrap_or(false) {
         return match finish_json_raw(w.buf) { Ok(r) => Ok(r), Err(e) => rerr(e) };
     }
-    let result_str = match finish_json_string(w.buf) {
+    if w.buf.len() > i32::MAX as usize { return rerr(oversize(w.buf.len())); }
+    let mut res = match finish_json_string(w.buf) {
         Ok(s) => s,
         Err(e) => return rerr(e),
     };
-    let mut res = Robj::from(result_str);
     res.set_class(&["json"])?;
     Ok(res)
 }
@@ -739,15 +879,21 @@ pub(crate) fn pretty_json_impl(x: Robj, indent: Robj) -> Result<Robj> {
 /// Errs towards `true`: a false positive merely runs an unnecessary R pass,
 /// while a false negative would emit an unconverted object.
 pub(crate) unsafe fn scan_needs_prep(x: libR_sys::SEXP, depth: u32, date_prep: bool) -> bool {
-    if depth > 64 {
-        // Too deep to be worth scanning; let R's slower path decide.
-        return true;
+    if depth > MAX_DEPTH {
+        // Past what the serializer will accept anyway, so it will raise the
+        // depth error itself. Claiming prep is needed here was worse than
+        // useless: it sent the whole structure through the interpreted-R
+        // .prep() recursion, which exhausts R's node stack at around 1600
+        // levels -- so as_json() failed on input obj_json_str_impl handles.
+        // The cap was 64. The scan is a couple of microseconds and flat with
+        // depth, so there was nothing to save.
+        return false;
     }
     let t = typeof_sexp(x);
     if t == libR_sys::SEXPTYPE::CPLXSXP as u32 || t == libR_sys::SEXPTYPE::RAWSXP as u32 {
         return true;
     }
-    if ATTRIB(x) != libR_sys::R_NilValue {
+    if ANY_ATTRIB(x) != 0 {
         let cls = classify(x);
         // Date is excluded when the caller intends the writer to format it,
         // which is the default: only Date = "epoch" still needs R.
@@ -791,10 +937,14 @@ pub(crate) fn threads_impl(n: Robj) -> Result<Robj> {
     if !n.is_null() {
         let v = n.as_integer().or_else(|| n.as_real().map(|f| f as i32));
         match v {
-            Some(v) => REQUESTED_THREADS.store(
-                if v <= 0 { 0 } else { v as usize },
-                std::sync::atomic::Ordering::Relaxed,
-            ),
+            Some(v) => {
+                REQUESTED_THREADS.store(
+                    if v <= 0 { 0 } else { v as usize },
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                // Returning to automatic has to re-resolve the default.
+                invalidate_thread_cache();
+            }
             None => return rerr("`n` must be a single number or NULL"),
         }
     }
@@ -809,4 +959,144 @@ extendr_module! {
     fn threads_impl;
     fn pretty_json_impl;
     fn needs_prep_impl;
+}
+
+// ------------------------------------------------------------------
+// TESTS
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the assembly is supposed to produce, written the obvious slow way.
+    fn naive_join(prefix: &[u8], parts: &[Vec<u8>], suffix: &[u8]) -> Vec<u8> {
+        let mut out = prefix.to_vec();
+        let mut first = true;
+        for p in parts {
+            if p.is_empty() {
+                continue;
+            }
+            if !first {
+                out.push(b',');
+            }
+            out.extend_from_slice(p);
+            first = false;
+        }
+        out.extend_from_slice(suffix);
+        out
+    }
+
+    fn assemble(prefix: &[u8], parts: &[Vec<u8>], suffix: &[u8]) -> Vec<u8> {
+        let (total, offs) = assembly_layout(prefix, parts, suffix);
+        let mut dst = vec![0u8; total];
+        unsafe { assemble_into(dst.as_mut_ptr(), total, prefix, parts, &offs, suffix) };
+        dst
+    }
+
+    #[test]
+    fn assembly_matches_a_naive_join() {
+        // Each chunk's destination is a prefix sum, and the chunks are then
+        // copied in parallel, so an off-by-one in the offsets or a misplaced
+        // separator corrupts the whole output rather than one value. Empty
+        // parts are the awkward case: they contribute no bytes AND no comma.
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![],
+            vec![b"a".to_vec()],
+            vec![b"a".to_vec(), b"b".to_vec()],
+            vec![vec![], b"b".to_vec()],
+            vec![b"a".to_vec(), vec![]],
+            vec![vec![], vec![]],
+            vec![vec![], b"b".to_vec(), vec![], b"d".to_vec(), vec![]],
+            vec![b"aaa".to_vec(), b"bb".to_vec(), b"c".to_vec()],
+            (0..40).map(|i| vec![b'0' + (i % 10) as u8; i]).collect(),
+        ];
+        for parts in cases {
+            for (prefix, suffix) in [
+                (&b""[..], &b""[..]),
+                (&b"["[..], &b"]"[..]),
+                (&b"{"[..], &b"}"[..]),
+                (FC_HEAD, FC_TAIL),
+            ] {
+                let want = naive_join(prefix, &parts, suffix);
+                let (total, _) = assembly_layout(prefix, &parts, suffix);
+                assert_eq!(total, want.len(), "size disagrees for {:?}", parts);
+                assert_eq!(assemble(prefix, &parts, suffix), want, "for {:?}", parts);
+            }
+        }
+    }
+
+    #[test]
+    fn assembly_offsets_point_where_the_bytes_land() {
+        let parts: Vec<Vec<u8>> = vec![b"aa".to_vec(), vec![], b"ccc".to_vec(), b"d".to_vec()];
+        let (total, offs) = assembly_layout(b"[", &parts, b"]");
+        let out = assemble(b"[", &parts, b"]");
+        assert_eq!(out.len(), total);
+        for (p, &o) in parts.iter().zip(offs.iter()) {
+            if p.is_empty() {
+                assert_eq!(o, usize::MAX, "an empty part must be marked");
+                continue;
+            }
+            assert_eq!(&out[o..o + p.len()], &p[..], "part is not at its offset");
+        }
+    }
+
+    // ---- the pretty printer ---------------------------------------
+
+    fn pretty(s: &str, w: usize) -> String {
+        String::from_utf8(pretty_json(s.as_bytes(), w)).unwrap()
+    }
+
+    #[test]
+    fn pretty_printing_follows_jsonlites_layout() {
+        // Not a generic pretty-printer: an array stays on one line when it
+        // holds no container, an object always expands unless empty, and the
+        // separators are ", " and ": ".
+        assert_eq!(pretty("[1,2,3]", 2), "[1, 2, 3]");
+        assert_eq!(pretty("[]", 2), "[]");
+        assert_eq!(pretty("{}", 2), "{}");
+        assert_eq!(pretty(r#"{"a":1}"#, 2), "{\n  \"a\": 1\n}");
+        assert_eq!(pretty("[[1,2],[3,4]]", 2), "[\n  [1, 2],\n  [3, 4]\n]");
+        assert_eq!(
+            pretty(r#"[{"a":1},{"a":2}]"#, 2),
+            "[\n  {\n    \"a\": 1\n  },\n  {\n    \"a\": 2\n  }\n]"
+        );
+        assert_eq!(pretty(r#"{"a":1}"#, 4), "{\n    \"a\": 1\n}");
+    }
+
+    #[test]
+    fn pretty_printing_leaves_strings_alone() {
+        // Punctuation inside a string is not structure. An escaped quote must
+        // not end the string, and an escaped backslash must not escape the
+        // quote that follows it.
+        let strip = |t: &str| -> String { t.chars().filter(|c| !c.is_whitespace()).collect() };
+        for s in [
+            r#"{"a":"[1,2]"}"#,
+            r#"{"a":"{\"b\":1}"}"#,
+            r#"{"a":"back\\"}"#,
+            r#"["a,b","c:d"]"#,
+            r#"{"a":"line\nbreak"}"#,
+        ] {
+            let out = pretty(s, 2);
+            assert_eq!(strip(&out), strip(s), "for {}", s);
+        }
+    }
+
+    #[test]
+    fn pretty_printing_survives_truncated_input() {
+        // It is only ever handed our own output, but it must not panic or read
+        // past the end on anything.
+        for s in ["", "[", "{", r#"{"a":"#, r#""unterminated"#, "[1,", r#"\"#] {
+            let _ = pretty_json(s.as_bytes(), 2);
+        }
+    }
+
+    #[test]
+    fn inlineable_marks_only_containers_without_children() {
+        let src = b"[[1,2],3]";
+        let inline = scan_inlineable(src);
+        assert_eq!(inline.len(), src.len());
+        assert!(!inline[0], "the outer array holds an array, so it expands");
+        assert!(inline[1], "the inner array holds only scalars");
+    }
 }

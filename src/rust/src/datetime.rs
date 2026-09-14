@@ -270,6 +270,13 @@ pub(crate) const DIGITS_SHORTEST: u8 = u8::MAX;
 #[inline]
 pub(crate) fn write_shortest_f64(buf: &mut Vec<u8>, v: f64) {
     if v.fract() == 0.0 && v.abs() < 9.007_199_254_740_992e15 {
+        // `v as i64` is 0 for both zeros, and this mode's whole promise is
+        // that the text reads back as the same double -- which -0.0 and 0.0
+        // are not. ryu keeps the sign; this integral shortcut did not, so
+        // as_json(-0.0, digits = Inf) came back as 0.
+        if v == 0.0 && v.is_sign_negative() {
+            buf.push(b'-');
+        }
         let mut tmp = itoa::Buffer::new();
         buf.extend_from_slice(tmp.format(v as i64).as_bytes());
         return;
@@ -304,16 +311,32 @@ pub(crate) const POW10_U: [u32; 10] = [
 /// every column and every coordinate) and not guaranteed to agree in the
 /// half-way cases.
 ///
-/// The caller guarantees `0 <= d < 10` and `1e-5 < |v| < 2^31`.
+/// The caller guarantees `0 <= d < 10` and `1e-5 < |v| < FIXED_MAX[d]`,
+/// which is `10^(17-d)` -- the point past which fixed notation would carry
+/// more significant digits than the `%g` fallback's 17-digit cap allows.
+/// modp_dtoa2 itself stops at 2^31, where its `(int)` cast overflows; this
+/// port uses an i64 and so reaches the real limit.
 #[inline]
 pub(crate) fn write_fixed_decimals(buf: &mut Vec<u8>, v: f64, d: usize) {
     let prec = d.min(9);
     let neg = v < 0.0;
     let value = if neg { -v } else { v };
 
-    let mut whole = value as i64;
+    // `as` casts on floats saturate, and the clamping is not free: `value as
+    // i64` costs six instructions past the conversion (a compare against
+    // 9.22e18, a movabs, a cmova, then a NaN check and a second cmov), and
+    // `tmp as u32` costs a maxsd and a minsd -- eight cycles of pure latency
+    // sitting directly on the dependency chain, which a disassembly of the
+    // built library put at the largest single item in this function.
+    //
+    // The caller's guard makes both ranges certain, so neither clamp can ever
+    // fire: `value` is finite and under FIXED_MAX[d] <= 1e17, well inside i64;
+    // and `value - whole` is in [0, 1) because the truncation is toward zero
+    // and `value` is positive, so `tmp` is in [0, 10^prec) <= [0, 1e9), well
+    // inside u32.
+    let mut whole = unsafe { value.to_int_unchecked::<i64>() };
     let tmp = (value - whole as f64) * POW10_F[prec];
-    let mut frac = tmp as u32;
+    let mut frac = unsafe { tmp.to_int_unchecked::<u32>() };
     let diff = tmp - frac as f64;
     let p10 = POW10_U[prec];
 
@@ -348,54 +371,123 @@ pub(crate) fn write_fixed_decimals(buf: &mut Vec<u8>, v: f64, d: usize) {
     // This is the hottest function in the package -- every double in every
     // column and every ordinate of every geometry -- and at four decimals it
     // was doing eight or nine divisions per value.
-    let mut rev = [0u8; 32];
+    // 24 bytes covers the widest this can produce: a sign, 17 whole digits
+    // (FIXED_MAX[1] is 1e16), a point and one decimal. Zeroed because the
+    // reversal below reads a fixed eight bytes from the low end whatever `k`
+    // turns out to be.
+    //
+    // Every store goes through a raw pointer. `k` is bounded by the digit
+    // counts above and LLVM cannot see that, so it was emitting a length
+    // check and a panic branch per digit PAIR.
+    let mut rev = [0u8; 24];
     let mut k = 0usize;
     let has_dec = count > 0;
+    let rp = rev.as_mut_ptr();
+    // SAFETY for every `put` below: `k` reaches at most
+    // d + 1 (point) + digits(FIXED_MAX[d]) + 1 (rounding carry) + 1 (sign).
+    // FIXED_MAX trades the first two off against each other, so working it
+    // through per `d`:
+    //
+    //   d = 0   2^31  ->  10 digits + carry           = 11
+    //   d = 1   1e16  ->  16 + carry + point + 1 + -  = 20
+    //   d = 2   1e15  ->  15 + carry + point + 2 + -  = 20
+    //     ...                              (each 20)
+    //   d = 7   1e10  ->  10 + carry + point + 7 + -  = 20
+    //   d = 8   2^31  ->  10 + carry + point + 8 + -  = 21
+    //   d = 9   2^31  ->  10 + carry + point + 9 + -  = 22
+    //
+    // so 22, and the pair stores reach index 22. `rev` is 24. An earlier
+    // version of this comment said 21, having dropped the carry; the crate's
+    // own test caught it on the first run.
+    macro_rules! put {
+        ($i:expr, $b:expr) => {
+            unsafe { *rp.add($i) = $b }
+        };
+    }
     while count >= 2 {
         let r = (frac % 100) as usize * 2;
         frac /= 100;
-        rev[k] = DIGIT_PAIRS[r + 1];
-        rev[k + 1] = DIGIT_PAIRS[r];
+        put!(k, DIGIT_PAIRS[r + 1]);
+        put!(k + 1, DIGIT_PAIRS[r]);
         k += 2;
         count -= 2;
     }
     if count == 1 {
-        rev[k] = b'0' + (frac % 10) as u8;
+        put!(k, b'0' + (frac % 10) as u8);
         frac /= 10;
         k += 1;
     }
-    if frac > 0 {
-        whole += 1;
-    }
+    // modp_dtoa2 carries here, but by this point it cannot fire: the trim
+    // leaves `frac` with exactly `count` digits (or zero, when the trim ran
+    // `prec` times and `frac` started below 10^prec), and the loops above
+    // consume exactly `count` of them. The two `frac >= p10` carries in the
+    // rounding above are what actually handles a rollover. Asserted rather
+    // than branched on, so a debug build still checks the reasoning.
+    debug_assert_eq!(frac, 0);
     if has_dec {
-        rev[k] = b'.';
+        put!(k, b'.');
         k += 1;
     }
     while whole >= 100 {
         let r = (whole % 100) as usize * 2;
         whole /= 100;
-        rev[k] = DIGIT_PAIRS[r + 1];
-        rev[k + 1] = DIGIT_PAIRS[r];
+        put!(k, DIGIT_PAIRS[r + 1]);
+        put!(k + 1, DIGIT_PAIRS[r]);
         k += 2;
     }
     if whole >= 10 {
         let r = whole as usize * 2;
-        rev[k] = DIGIT_PAIRS[r + 1];
-        rev[k + 1] = DIGIT_PAIRS[r];
+        put!(k, DIGIT_PAIRS[r + 1]);
+        put!(k + 1, DIGIT_PAIRS[r]);
         k += 2;
     } else {
         // Also the `whole == 0` case, which must still write a leading zero.
-        rev[k] = b'0' + whole as u8;
+        put!(k, b'0' + whole as u8);
         k += 1;
     }
     if neg {
-        rev[k] = b'-';
+        put!(k, b'-');
         k += 1;
     }
 
     // resize() zero-fills and then every byte is overwritten, which is
     // twice the stores on the hottest formatting path in the package.
     // Reserve and write through the spare capacity instead.
+    //
+    // The reversal itself was a byte loop, and every store depended on the
+    // one before it: nine or ten of them for a coordinate like -120.1234,
+    // which is why a geometry ordinate cost about 38 ns against 21 for a
+    // number in (0, 1). A byte-swapped u64 reverses eight at a time, so the
+    // whole of a typical value becomes one load, one bswap, one shift and one
+    // store. The shift discards the bytes past `k`, and only `k` are counted,
+    // so the reserved-but-unused tail is written and ignored.
+    if k <= 16 {
+        buf.reserve(16);
+        unsafe {
+            let dst = buf.as_mut_ptr().add(buf.len());
+            // `rev` is 24 bytes, so both reads are inside it for any k <= 16.
+            let lo = u64::from_le_bytes(*(rev.as_ptr() as *const [u8; 8]));
+            if k <= 8 {
+                let w = (lo.swap_bytes() >> ((8 - k) * 8)).to_le_bytes();
+                std::ptr::copy_nonoverlapping(w.as_ptr(), dst, 8);
+            } else {
+                let hi = u64::from_le_bytes(*(rev.as_ptr().add(k - 8) as *const [u8; 8]));
+                let w = hi.swap_bytes().to_le_bytes();
+                std::ptr::copy_nonoverlapping(w.as_ptr(), dst, 8);
+                let w = (lo.swap_bytes() >> ((16 - k) * 8)).to_le_bytes();
+                std::ptr::copy_nonoverlapping(w.as_ptr(), dst.add(8), 8);
+            }
+            buf.set_len(buf.len() + k);
+        }
+        return;
+    }
+    // Asserted against the array rather than the number, so the bound above
+    // being wrong again cannot become an out-of-bounds write. Every `put!`
+    // stores at an index below the final `k`, including the pair form, so
+    // `k <= rev.len()` is what keeps them inside.
+    debug_assert!(k <= rev.len(), "digit scratch overrun: k = {}", k);
+    // Wider than sixteen bytes needs ten whole digits and nine decimals at
+    // once, which the fast path's own range test very nearly excludes.
     buf.reserve(k);
     unsafe {
         let dst = buf.as_mut_ptr().add(buf.len());
@@ -409,7 +501,7 @@ pub(crate) fn write_fixed_decimals(buf: &mut Vec<u8>, v: f64, d: usize) {
 impl JsonWriter {
     #[inline]
     pub(crate) fn with_capacity(cap: usize) -> Self {
-        Self { buf: Vec::with_capacity(cap) }
+        Self { buf: Vec::with_capacity(cap), scratch: Vec::new() }
     }
     #[inline(always)]
     pub(crate) fn push_u8(&mut self, b: u8) {
@@ -419,6 +511,34 @@ impl JsonWriter {
     pub(crate) fn push_bytes(&mut self, s: &[u8]) {
         self.buf.extend_from_slice(s);
     }
+    /// Appends a key, at a fixed width when it is short enough.
+    ///
+    /// `push_bytes` is `extend_from_slice` with a runtime length, which lowers
+    /// to a call to memcpy; for a four-byte key the call costs more than the
+    /// bytes do. That is the whole difference between the row-oriented writer,
+    /// which emits the key once per row and pays 9 ns of envelope, and the
+    /// column-oriented one, which emits it once per column and pays 1.8.
+    ///
+    /// Two eight-byte copies with constant lengths become two unaligned
+    /// stores. Both reads are inside `k.bytes`, which `Key::new` padded to
+    /// `KEY_PAD`; both writes are inside the reservation; and the length
+    /// advances by the real key length, so the padding is never emitted.
+    #[inline(always)]
+    pub(crate) fn push_key(&mut self, k: &Key) {
+        if k.len > KEY_PAD {
+            self.buf.extend_from_slice(k.as_slice());
+            return;
+        }
+        self.buf.reserve(KEY_PAD);
+        unsafe {
+            let src = k.bytes.as_ptr();
+            let n = self.buf.len();
+            let dst = self.buf.as_mut_ptr().add(n);
+            std::ptr::copy_nonoverlapping(src, dst, 8);
+            std::ptr::copy_nonoverlapping(src.add(8), dst.add(8), 8);
+            self.buf.set_len(n + k.len);
+        }
+    }
     #[inline(always)]
     pub(crate) fn push_i32(&mut self, v: i32) {
         let mut tmp = itoa::Buffer::new();
@@ -426,7 +546,7 @@ impl JsonWriter {
     }
     #[inline(always)]
     pub(crate) fn push_f64_cfg(&mut self, v: f64, config: SerializerConfig) {
-        write_f64_json(&mut self.buf, v, config.digits, config.always_decimal);
+        write_f64_json(&mut self.buf, v, config);
     }
     #[inline(always)]
     pub(crate) fn push_bool(&mut self, v: bool) {
@@ -461,6 +581,27 @@ pub(crate) fn find_escape(bytes: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Widens latin1 bytes to UTF-8, appending to `out`.
+///
+/// Only ever called for a cell the prepass cleared, which means one holding
+/// no byte in `0x80..0xA0`. That range is the ambiguous one -- R renders it
+/// as CP1252 on this platform and a strict ISO-8859-1 iconv renders it as the
+/// C1 controls, 27 of the 256 bytes disagreeing -- so those cells go through
+/// `Rf_translateCharUTF8` and get the platform's own answer. Everything else
+/// is its own code point and widens with no table at all.
+#[inline]
+pub(crate) fn widen_latin1_into(out: &mut Vec<u8>, src: &[u8]) {
+    out.reserve(src.len() * 2);
+    for &b in src {
+        if b < 0x80 {
+            out.push(b);
+        } else {
+            out.push(0xC0 | (b >> 6));
+            out.push(0x80 | (b & 0x3F));
+        }
+    }
 }
 
 #[inline]
@@ -540,6 +681,165 @@ pub(crate) fn build_escaped_key_bytes(name: &[u8]) -> Vec<u8> {
     key
 }
 
+/// How wide a key has to be for `push_key` to copy it at a fixed width.
+pub(crate) const KEY_PAD: usize = 16;
+
+/// An escaped `"name":` key, zero-padded to `KEY_PAD` when it is short.
+///
+/// The padding exists so `JsonWriter::push_key` can read sixteen bytes from it
+/// without leaving the allocation. `len` is how many of them are the key.
+pub(crate) struct Key {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) len: usize,
+}
+
+impl Key {
+    pub(crate) fn new(escaped: Vec<u8>) -> Self {
+        let len = escaped.len();
+        let mut bytes = escaped;
+        if len <= KEY_PAD {
+            bytes.resize(KEY_PAD, 0);
+        }
+        Key { bytes, len }
+    }
+    pub(crate) fn from_name(name: &[u8]) -> Self {
+        Key::new(build_escaped_key_bytes(name))
+    }
+    #[inline(always)]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Above this many names, a repeat is looked for with a set rather than by
+/// comparing every pair.
+///
+/// Below it the quadratic scan is the cheaper of the two -- it touches only
+/// the names vector's own memory and allocates nothing, and a three-name list
+/// costs three comparisons. The crossover is where one allocation starts to
+/// be worth avoiding n^2/2 pointer compares.
+pub(crate) const NAME_SCAN_MAX: usize = 32;
+
+/// Does any of `n` names need rewriting -- is one of them empty, NA, or a
+/// repeat of another?
+///
+/// For wide objects. A narrow one is checked as it is written, which costs
+/// nothing; see `escaped_keys` and the named-list branch of the serializer.
+pub(crate) unsafe fn wide_names_need_fixing(names: libR_sys::SEXP, n: usize) -> bool {
+    let np = libR_sys::STRING_PTR_RO(names);
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::with_capacity(n);
+    for i in 0..n {
+        let cs = *np.add(i);
+        // R interns its strings, so two equal names are the same CHARSXP and
+        // a repeat is a pointer comparison.
+        if is_na_string(cs) || libR_sys::Rf_xlength(cs) == 0 || !seen.insert(cs as usize) {
+            return true;
+        }
+    }
+    false
+}
+
+/// jsonlite's rule for the names of a list or a frame, which is R's own.
+///
+/// An empty or NA name becomes the element's 1-based index, and then
+/// `make.unique` appends `.1`, `.2` and so on until the name is one no other
+/// element already carries -- looking at the WHOLE set, not just the names
+/// already emitted, which is why `c("a", "a", "a.1")` becomes
+/// `a`, `a.2`, `a.1` rather than `a`, `a.1`, `a.1`.
+///
+/// Only called once something has been found to need rewriting. Without it a
+/// list like `list(a = 1, 2)` emitted an empty key, and `c("a", "a")` emitted
+/// the same key twice.
+pub(crate) unsafe fn mangled_names(names: libR_sys::SEXP, n: usize) -> Vec<Vec<u8>> {
+    let np = libR_sys::STRING_PTR_RO(names);
+
+    // The index stands in for a name that is not there.
+    let mut base: Vec<Vec<u8>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let cs = *np.add(i);
+        if is_na_string(cs) || libR_sys::Rf_xlength(cs) == 0 {
+            let mut tmp = itoa::Buffer::new();
+            base.push(tmp.format(i + 1).as_bytes().to_vec());
+        } else {
+            // Copied straight away: a translated CHARSXP lives on R's vmax
+            // stack and is only valid until the next allocation.
+            base.push(charsxp_to_utf8_bytes(cs).unwrap_or(b"").to_vec());
+        }
+    }
+
+    let mut taken: std::collections::HashSet<Vec<u8>> = base.iter().cloned().collect();
+    let mut used: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::with_capacity(n);
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(n);
+    for b in base.into_iter() {
+        if used.insert(b.clone()) {
+            out.push(b);
+            continue;
+        }
+        let mut k: u64 = 1;
+        loop {
+            let mut cand = b.clone();
+            cand.push(b'.');
+            let mut tmp = itoa::Buffer::new();
+            cand.extend_from_slice(tmp.format(k).as_bytes());
+            if taken.insert(cand.clone()) {
+                used.insert(cand.clone());
+                out.push(cand);
+                break;
+            }
+            k += 1;
+        }
+    }
+    out
+}
+
+/// `mangled_names` as pre-escaped keys.
+pub(crate) unsafe fn mangled_keys(names: libR_sys::SEXP, n: usize) -> Vec<Key> {
+    mangled_names(names, n).iter().map(|b| Key::from_name(b)).collect()
+}
+
+/// Pre-escaped `"name":` keys for each element of `x`'s `names` attribute.
+///
+/// The column builder used to take names and escape them itself, which meant
+/// two allocations per column -- the name, then the key -- for a value it uses
+/// exactly once. A frame of two columns paid five allocations before writing a
+/// byte, and a list of 200 small frames paid a thousand.
+pub(crate) unsafe fn escaped_keys(x: libR_sys::SEXP, n: usize) -> Option<Vec<Key>> {
+    let names_sexp = libR_sys::Rf_getAttrib(x, libR_sys::R_NamesSymbol);
+    if names_sexp == libR_sys::R_NilValue
+        || typeof_sexp(names_sexp) != libR_sys::SEXPTYPE::STRSXP as u32
+        || sexp_len(names_sexp) != n
+    {
+        return None;
+    }
+    // An empty, NA or repeated name has to be rewritten the way R does it.
+    // A wide frame is checked up front; a narrow one is checked as the keys
+    // are built, so the ordinary frame pays only the pointer comparisons
+    // against the names it has already seen.
+    let wide = n > NAME_SCAN_MAX;
+    if wide && wide_names_need_fixing(names_sexp, n) {
+        return Some(mangled_keys(names_sexp, n));
+    }
+    let np = libR_sys::STRING_PTR_RO(names_sexp);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let cs = *np.add(i);
+        let bytes: &[u8] = if is_na_string(cs) {
+            b""
+        } else {
+            charsxp_to_utf8_bytes(cs).unwrap_or(b"")
+        };
+        if !wide && (bytes.is_empty() || (0..i).any(|j| *np.add(j) == cs)) {
+            return Some(mangled_keys(names_sexp, n));
+        }
+        out.push(Key::from_name(bytes));
+    }
+    Some(out)
+}
+
 /// UTF-8 name bytes for each element of `x`'s `names` attribute.
 ///
 /// Deliberately does not go through extendr's `Robj::names()`, which hands back
@@ -569,3 +869,219 @@ pub(crate) unsafe fn utf8_names(x: libR_sys::SEXP, n: usize) -> Option<Vec<Vec<u
     Some(out)
 }
 
+// ------------------------------------------------------------------
+// TESTS
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn esc(s: &[u8]) -> String {
+        let mut b = Vec::new();
+        escape_json_string_into(&mut b, s);
+        String::from_utf8(b).unwrap()
+    }
+
+    #[test]
+    fn escaping_matches_jsonlite_rules() {
+        // Short escapes for the five named ones, lowercase \u00xx for the rest
+        // of the control range, and NO escaping of the solidus or DEL -- except
+        // a solidus that follows '<', which is how an embedded </script> is
+        // kept from closing the enclosing block.
+        assert_eq!(esc(b"plain"), "\"plain\"");
+        assert_eq!(esc(b"a\"b"), "\"a\\\"b\"");
+        assert_eq!(esc(b"a\\b"), "\"a\\\\b\"");
+        assert_eq!(esc(b"a\nb"), "\"a\\nb\"");
+        assert_eq!(esc(b"a\tb"), "\"a\\tb\"");
+        assert_eq!(esc(b"a\rb"), "\"a\\rb\"");
+        assert_eq!(esc(&[b'a', 0x08, b'b']), "\"a\\bb\"");
+        assert_eq!(esc(&[b'a', 0x0C, b'b']), "\"a\\fb\"");
+        assert_eq!(esc(&[b'a', 0x01, b'b']), "\"a\\u0001b\"");
+        assert_eq!(esc(&[b'a', 0x1F, b'b']), "\"a\\u001fb\"");
+        assert_eq!(esc(&[b'a', 0x7F, b'b']), "\"a\x7fb\"");
+        assert_eq!(esc(b"a/b"), "\"a/b\"");
+        assert_eq!(esc(b"</script>"), "\"<\\/script>\"");
+        assert_eq!(esc(b"a<b"), "\"a<b\"");
+        assert_eq!(esc(b""), "\"\"");
+    }
+
+    #[test]
+    fn latin1_widens_to_the_same_code_point() {
+        // Every byte the fast path is allowed to see, against Rust's own
+        // UTF-8 encoder for the code point of the same number -- which is
+        // what "latin1 byte n is code point n" means.
+        for b in 0u8..=0xFF {
+            if (0x80..0xA0).contains(&b) {
+                continue; // ambiguous; the prepass sends these to R
+            }
+            let mut got = Vec::new();
+            widen_latin1_into(&mut got, &[b]);
+            let mut want = [0u8; 4];
+            let want = char::from_u32(b as u32).unwrap().encode_utf8(&mut want);
+            assert_eq!(got, want.as_bytes(), "byte 0x{:02x}", b);
+            assert!(std::str::from_utf8(&got).is_ok(), "byte 0x{:02x} is not UTF-8", b);
+        }
+    }
+
+    #[test]
+    fn widening_then_escaping_is_the_same_as_escaping_utf8() {
+        // The writer widens into scratch and escapes out of it, so the two
+        // steps have to compose: a latin1 string must produce exactly what
+        // the same text held as UTF-8 would. The cases put high bytes next to
+        // every escape, including either side of the '<' '/' pair, which is
+        // the one rule that looks at more than one byte.
+        let highs: [u8; 4] = [0xA0, 0xC9, 0xE9, 0xFF];
+        let specials: [u8; 8] = [b'<', b'/', b'"', b'\\', 0x08, 0x0A, 0x1F, b'x'];
+        for &h in &highs {
+            for &a in &specials {
+                for &c in &specials {
+                    let src = [a, h, c, h, a, c];
+                    let mut wide = Vec::new();
+                    widen_latin1_into(&mut wide, &src);
+                    let mut via_latin1 = Vec::new();
+                    escape_json_string_into(&mut via_latin1, &wide);
+                    // The same text, already UTF-8.
+                    let text: String = src
+                        .iter()
+                        .map(|&b| char::from_u32(b as u32).unwrap())
+                        .collect();
+                    let mut via_utf8 = Vec::new();
+                    escape_json_string_into(&mut via_utf8, text.as_bytes());
+                    assert_eq!(
+                        via_latin1, via_utf8,
+                        "{:?}", src
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn find_escape_agrees_with_a_byte_scan() {
+        // Unrolled eight at a time, so the seam between the blocks and the
+        // remainder is where an off-by-one would hide.
+        for len in 0..40usize {
+            for pos in 0..len {
+                let mut v = vec![b'a'; len];
+                v[pos] = b'\n';
+                assert_eq!(find_escape(&v), Some(pos), "len {} pos {}", len, pos);
+            }
+            let clean = vec![b'a'; len];
+            assert_eq!(find_escape(&clean), None, "len {}", len);
+        }
+    }
+
+
+    #[test]
+    fn timestamps_render_in_every_layout() {
+        // Local civil seconds, already shifted by R, so the writer is plain
+        // arithmetic. 1577872800 is 2020-01-01 10:00:00.
+        let t = |v: f64, fmt: u32| {
+            let mut b = Vec::new();
+            write_time_cell(&mut b, v, fmt, NaMode::Null);
+            String::from_utf8(b).unwrap()
+        };
+        assert_eq!(t(1577872800.0, TFMT_DATE), "\"2020-01-01\"");
+        assert_eq!(t(1577872800.0, TFMT_SPACE), "\"2020-01-01 10:00:00\"");
+        assert_eq!(t(1577872800.0, TFMT_T), "\"2020-01-01T10:00:00\"");
+        assert_eq!(t(1577872800.0, TFMT_TZ), "\"2020-01-01T10:00:00Z\"");
+        assert_eq!(t(0.0, TFMT_SPACE), "\"1970-01-01 00:00:00\"");
+        // Before the epoch, where a truncating division would give the wrong
+        // day and a negative hour.
+        assert_eq!(t(-1.0, TFMT_SPACE), "\"1969-12-31 23:59:59\"");
+        assert_eq!(t(-86400.0, TFMT_SPACE), "\"1969-12-31 00:00:00\"");
+        assert_eq!(t(-86401.0, TFMT_SPACE), "\"1969-12-30 23:59:59\"");
+        // The last second of a day, and a leap day.
+        assert_eq!(t(86399.0, TFMT_SPACE), "\"1970-01-01 23:59:59\"");
+        assert_eq!(t(1582934400.0, TFMT_DATE), "\"2020-02-29\"");
+    }
+
+    #[test]
+    fn a_timestamp_that_is_not_an_instant() {
+        let t = |v: f64, na: NaMode| {
+            let mut b = Vec::new();
+            write_time_cell(&mut b, v, TFMT_SPACE, na);
+            String::from_utf8(b).unwrap()
+        };
+        assert_eq!(t(na_real(), NaMode::Null), "null");
+        assert_eq!(t(na_real(), NaMode::String), "\"NA\"");
+        assert_eq!(t(f64::NAN, NaMode::Null), "\"NaN\"");
+        assert_eq!(t(f64::INFINITY, NaMode::Null), "\"Inf\"");
+        assert_eq!(t(f64::NEG_INFINITY, NaMode::Null), "\"-Inf\"");
+    }
+
+    #[test]
+    fn seconds_and_days_stay_consistent_with_each_other() {
+        // A timestamp at midnight must name the same day the Date writer does
+        // for the matching day number, or a POSIXct and a Date would disagree.
+        for day in [-25567i64, -1, 0, 1, 11016, 18262, 18321, 50000] {
+            let mut a = Vec::new();
+            write_date_cell(&mut a, date_cell(day as f64), NaMode::Null);
+            let mut b = Vec::new();
+            write_time_cell(&mut b, (day * 86400) as f64, TFMT_DATE, NaMode::Null);
+            assert_eq!(a, b, "day {}", day);
+        }
+    }
+
+    #[test]
+    fn keys_survive_the_padding_boundary() {
+        // push_key copies sixteen bytes whatever the real length, so the
+        // padding has to be there and the length must still be the real one.
+        for len in 0..40usize {
+            let name: Vec<u8> = std::iter::repeat(b'k').take(len).collect();
+            let k = Key::from_name(&name);
+            let mut w = JsonWriter::with_capacity(0);
+            w.push_key(&k);
+            w.push_bytes(b"1");
+            let got = String::from_utf8(w.buf).unwrap();
+            let want = format!("{}{}{}:1", '"', String::from_utf8(name).unwrap(), '"');
+            assert_eq!(got, want, "key of {} bytes", len);
+        }
+    }
+
+    /// R's NA_real_: a quiet NaN whose low-order word is 1954, which is how
+    /// R itself tells NA from an ordinary NaN. `from_bits` is not const on
+    /// the pinned 1.65 toolchain, so this is a function.
+    fn na_real() -> f64 {
+        f64::from_bits(0x7FF0_0000_0000_07A2)
+    }
+
+    #[test]
+    fn dates_match_the_civil_calendar() {
+        let d = |days: f64| {
+            let mut b = Vec::new();
+            write_date_cell(&mut b, date_cell(days), NaMode::Null);
+            String::from_utf8(b).unwrap()
+        };
+        assert_eq!(d(0.0), "\"1970-01-01\"");
+        assert_eq!(d(-1.0), "\"1969-12-31\"");
+        assert_eq!(d(18262.0), "\"2020-01-01\"");
+        // 2020 and 2000 are leap years; 1900 was not.
+        assert_eq!(d(18321.0), "\"2020-02-29\"");
+        assert_eq!(d(11016.0), "\"2000-02-29\"");
+        assert_eq!(d(-25567.0), "\"1900-01-01\"");
+        // %Y pads to four characters, sign included.
+        assert_eq!(d(-719162.0), "\"0001-01-01\"");
+    }
+
+    #[test]
+    fn a_date_that_is_not_a_day_keeps_its_own_spelling() {
+        // NA and NaN are both NaNs and both satisfy is.na(), but they format
+        // differently, and only NA answers to the `na` argument. A NaN Date
+        // used to format as an ordinary day number.
+        assert!(unsafe { is_na_real(na_real()) });
+        assert!(!unsafe { is_na_real(f64::NAN) });
+        let d = |v: f64, na: NaMode| {
+            let mut b = Vec::new();
+            write_date_cell(&mut b, date_cell(v), na);
+            String::from_utf8(b).unwrap()
+        };
+        assert_eq!(d(na_real(), NaMode::Null), "null");
+        assert_eq!(d(na_real(), NaMode::String), "\"NA\"");
+        assert_eq!(d(f64::NAN, NaMode::Null), "\"NaN\"");
+        assert_eq!(d(f64::NAN, NaMode::String), "\"NaN\"");
+        assert_eq!(d(f64::INFINITY, NaMode::Null), "\"Inf\"");
+        assert_eq!(d(f64::NEG_INFINITY, NaMode::Null), "\"-Inf\"");
+    }
+}

@@ -87,9 +87,48 @@ bigi$m <- matrix(sample(1e6L, 20000 * 4), nrow = 20000)
 cmp(bigi, "20k rows x 4-wide integer matrix")
 
 cat("\n== an array column, which is not a matrix ==\n")
+# Three dimensions and up are now described for the workers rather than
+# rendered serially into an arena, so each type and each argument that changes
+# a value's text needs a case, and one shape has to be large enough to be cut
+# into chunks.
 d4 <- data.frame(i = 1:2)
 d4$a <- array(1:12, dim = c(2, 3, 2))
 cmp(d4, "3-d array column")
+mkarr <- function(v, dim) { d <- data.frame(i = seq_len(dim[1])); d$a <- array(v, dim = dim); d }
+cmp(mkarr(as.numeric(1:12), c(2, 3, 2)), "3-d double array column")
+cmp(mkarr(c(TRUE, FALSE, NA, rep(TRUE, 9)), c(2, 3, 2)), "3-d logical array column")
+cmp(mkarr(letters[1:12], c(2, 3, 2)), "3-d character array column")
+cmp(mkarr(complex(real = 1:12, imaginary = 12:1), c(2, 3, 2)), "3-d complex array column")
+cmp(mkarr(as.numeric(1:24), c(2, 3, 2, 2)), "4-d double array column")
+nfa <- c(1.5, NA, NaN, Inf, -Inf, 2.5, 1e-9, 1e20, 0, -0.0, 7, 8)
+cmp(mkarr(nfa, c(2, 3, 2)), "3-d array with non-finite, default na")
+for (na in c("null", "string")) {
+  cmp(mkarr(nfa, c(2, 3, 2)), sprintf("3-d array non-finite, na=%s", na), na = na)
+}
+for (dg in list(2, 4, NA)) {
+  cmp(mkarr(runif(12), c(2, 3, 2)), sprintf("3-d array digits = %s", dg), digits = dg)
+}
+cmp(mkarr(as.numeric(1:12), c(2, 3, 2)), "3-d array always_decimal", always_decimal = TRUE)
+for (dfm in c("rows", "columns", "values")) {
+  cmp(mkarr(as.numeric(1:12), c(2, 3, 2)), sprintf("3-d array, dataframe = %s", dfm),
+      dataframe = dfm)
+}
+cmp(list(d = mkarr(as.numeric(1:12), c(2, 3, 2))), "3-d array column, nested frame")
+set.seed(4)
+biga <- mkarr(runif(20000 * 20), c(20000, 20))
+biga$a <- array(runif(20000 * 4 * 5), dim = c(20000, 4, 5))
+cmp(biga, "20k rows x 4 x 5 double array column")
+{
+  ts <- c(1L, 2L, 8L, 0L)
+  outs <- vapply(ts, function(t) { fastgeojson_threads(t); as.character(as_json(biga)) }, "")
+  fastgeojson_threads(0)
+  if (length(unique(outs)) == 1L) {
+    cat("  PASS  array column identical at 1, 2, 8 and automatic threads\n")
+  } else {
+    fails <- fails + 1L
+    cat("  FAIL  array column output depends on the worker count\n")
+  }
+}
 
 cat(sprintf("\n%d failure(s)\n", fails))
 if (fails > 0) quit(status = 1)

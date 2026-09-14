@@ -17,6 +17,7 @@ Description: A high-performance 'JSON' encoder implemented in 'Rust'. It provide
 License: MIT + file LICENSE
 URL: https://github.com/firstzeroenergy/fastgeojson
 BugReports: https://github.com/firstzeroenergy/fastgeojson/issues
+Depends: R (>= 4.5)
 SystemRequirements: Cargo (Rust's package manager), rustc
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

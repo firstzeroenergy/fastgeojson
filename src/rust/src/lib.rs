@@ -31,6 +31,7 @@ use std::slice;
 //   capi       CHARSXP handling, encodings, names, attributes
 //   serialize  the recursive writer for lists, vectors and matrices
 //   columns    per-column descriptors and the cell writers
+//   dfwrite    the data.frame body both entry points share
 //   geometry   sfc flattening and the coordinate writers
 //   exports    the #[extendr] entry points, assembly, and pretty printing
 //
@@ -42,6 +43,7 @@ mod columns;
 mod config;
 mod datetime;
 mod decls;
+mod dfwrite;
 mod exports;
 mod geometry;
 mod numfmt;
@@ -54,6 +56,7 @@ pub(crate) use columns::*;
 pub(crate) use config::*;
 pub(crate) use datetime::*;
 pub(crate) use decls::*;
+pub(crate) use dfwrite::*;
 pub(crate) use geometry::*;
 pub(crate) use numfmt::*;
 pub(crate) use pool::*;

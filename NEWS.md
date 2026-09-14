@@ -6,6 +6,14 @@ validating against jsonlite's own test suite.
 
 ## Breaking changes
 
+* **`sf_geojson_str()` and `df_json_str()` are removed.** `as_json()` does
+  everything they did and dispatches on the input, so they were a second way
+  to say the same thing -- and a worse one: they skipped `as_json()`'s
+  pre-encoding, so `Date`, `POSIXt`, `complex` and `raw` went down a different
+  path with different output. Replace `df_json_str(x, ...)` with
+  `as_json(x, ...)` and `sf_geojson_str(x, ...)` with `as_json(x, ...)`.
+  The exported surface is now `as_json()` and `fastgeojson_threads()`.
+
 * **`as_json()`'s signature now matches `jsonlite::toJSON()`** argument for
   argument, in the same order, and accepts `...`. Code that passed arguments
   positionally beyond `x` must be updated -- `as_json(df, "columns")` now means
@@ -52,6 +60,31 @@ validating against jsonlite's own test suite.
 * `difftime` and `integer64` are converted rather than reinterpreted;
   `integer64` values were previously emitted as garbage doubles.
 
+### `digits = I(n)` was neither the right rounding nor the right notation
+
+`I(n)` asks for *significant* digits, which `toJSON()` renders with
+`sprintf("%.*g")`. This applied `signif()` to the whole object in R and then
+formatted the rounded values at 15 digits, which was wrong in two ways:
+`signif()` rounds the binary value half-to-even where `%g` rounds the decimal
+expansion, and 15 digits never selects scientific notation. So `12345` at
+`I(4)` came out as `12340` against `toJSON()`'s `1.234e+04`, and `0.12345` as
+`0.1234` against `0.1235`.
+
+The writer has had `%.*g` all along, for `digits = NA`; the argument simply
+never reached it. Removing the R-side pass also made the mode 7x to 11x
+faster, since it was an interpreted recursive walk that copied the object:
+
+| shape | before | after | |
+|---|---|---|---|
+| 200000 doubles, `I(4)` | 20.0 ms | 1.8 | **11.3x** |
+| 200000 doubles, `I(8)` | 21.1 | 1.8 | **11.5x** |
+| 200000 x 4 frame, `I(4)` | 75.8 | 10.5 | **7.3x** |
+| 20000 small lists, `I(4)` | 118.1 | 10.5 | **11.2x** |
+
+Checked against `toJSON()` at every precision from `I(0)` to `I(17)`, over
+values spanning 24 orders of magnitude, through data frames, nested frames,
+lists and matrices, and under every `na` mode.
+
 ### Further parity fixes
 
 * A logical matrix column emitted `null` for every cell, and so did a
@@ -75,6 +108,38 @@ validating against jsonlite's own test suite.
 * A zero-length coordinate vector emitted a null geometry rather than
   `{"type":"Point","coordinates":[]}`. A real `POINT EMPTY` from `st_point()`
   is two NAs and never took that branch.
+
+### A nested data.frame is now the same data.frame
+
+`as_json()` had two implementations of a data frame. The top-level entry point
+built one descriptor per column and walked rows in the worker pool; the
+recursive serializer, which is what a frame reached through a list goes
+through, had its own per-cell loop instead. That loop knew about far less than
+a column can be, so nine things were wrong below the top level -- every one of
+them reachable from `as_json(list(d = df))`:
+
+* A `Date` column emitted its epoch day number: `18262` for `"2020-01-01"`.
+* A `POSIXct` column emitted local civil seconds: `1577872800`.
+* `na` left at its default emitted `"NA"` and `null` where `toJSON()` omits the
+  key, so a row that should read `{}` came out as `{"a":"NA","b":null}`.
+* A matrix column emitted only the row's first value: `1` for `[1,3]`.
+* An `sfc` column lost its type: `[1,2]` for a Point.
+* `dataframe = "columns"` was ignored -- the argument never reached the
+  recursive entry point at all.
+* `dataframe = "values"` likewise.
+* A `data.frame`-valued column, as `tidyr::nest()` produces, repeated the Date
+  and matrix defects, being rendered by the same per-cell writer.
+* A list column holding a frame did too.
+
+There is now one implementation. The recursive serializer hands a frame to the
+column builder and the pooled row loop, which is also 3.8x to 4.5x faster for
+being parallel, and a nested frame measures the same as the identical frame at
+top level (9.7 ms against 9.7 ms for 100000 rows x 8 columns, against 38.5 ms
+before).
+
+`rownames = FALSE` still applies only to the outermost frame, which `toJSON()`
+applies throughout; a nested frame with row names emits `_row` regardless.
+That one is unchanged from previous releases.
 
 ## Memory safety
 
@@ -166,6 +231,314 @@ Single-threaded throughput, which is the algorithmic number:
 
 At full width, the wide frame reaches 759 MB/s (13x its old figure) and
 polygon layers 721 MB/s (19x), both of which previously ran on a single core.
+
+### `rownames` has three states, and now reaches every depth
+
+`toJSON()`'s `rownames` is not a two-state flag. Absent, it emits `_row` only
+when the row names are informative -- character and not all digits. Given as
+`TRUE`, it always emits `_row`, rendering `row.names(x)` by type, so an integer
+comes out unquoted and the automatic `1..n` is materialised as numbers. Given
+as `FALSE`, never.
+
+We had two states, applied in R, which meant they reached only the outermost
+frame: `as_json(list(d = df), rownames = FALSE)` still emitted `_row`. And the
+`TRUE` state did not exist -- it was folded into the absent one, so asking for
+row names a frame does not store produced nothing where `toJSON()` produces
+`{"a":1,"_row":1}`.
+
+The argument now travels to the writer as a three-state value, so a nested
+frame, a `data.frame`-valued column and an `sf` object's properties all honour
+it. Distinguishing the two questions took a second test: `is_default_rownames`
+answers "does jsonlite omit this by default", which is true of `c("7", "8")`,
+while the new `is_compact_rownames` answers "is there anything stored at all",
+which is false for it -- so `rownames = TRUE` prints `"7"` rather than `1`.
+
+Checked across 126 cases: seven kinds of row names by three states by three
+orientations, at top level and nested.
+
+### A `data.frame`-valued column inherits the orientation
+
+The column `tidyr::nest()` produces was rendered row-oriented whatever
+`dataframe` said. `toJSON()` renders it column-oriented under `"columns"` --
+one object for the whole column rather than one per row -- and as bare arrays
+of values under `"values"`.
+
+| | `toJSON()` | before |
+|---|---|---|
+| `dataframe = "columns"` | `{"a":[1,2],"n":{"a":[1,2]}}` | `{"a":[1,2],"n":[{"a":1},{"a":2}]}` |
+| `dataframe = "values"` | `[[1,[1]],[2,[2]]]` | `[[1,{"a":1}],[2,{"a":2}]]` |
+
+The column-oriented form needed a column kind that renders once for the whole
+column rather than cell by cell, since it has no `[...]` around it at all.
+
+### The two geometry writers are now checked against each other
+
+An `sf` object's geometry is rendered by `write_geometry_parallel`, in a
+worker, from a descriptor the extraction pass built. The same `sfc` reached
+through a list is rendered by `render_geometry_to_bytes`, recursively, on the R
+thread. Two implementations of one thing -- which is exactly the shape that
+produced nine defects in the data.frame writer before the two were merged.
+
+`verify_geometry_parity.R` checked the `sf` path against `toJSON()` but never
+the two against each other. It now does: 30 shapes (every type, XYZ/XYM/XYZM,
+every empty, geometry collections, and the >= 32-point matrices that arrive
+ALTREP-wrapped) by nine argument sets that change a coordinate's text
+(`digits` at 0, 8, NA, `I(4)` and `Inf`, both `na` modes, `always_decimal`),
+compared three ways each, plus a 2000-feature mixed layer so the descriptor
+path really chunks.
+
+All 270 agree. The duplication has not produced a divergence here -- but it is
+checked now rather than assumed.
+
+### `dataframe = "columns"` splits rows as well as columns
+
+The column-oriented writer gave each column to one worker, which left most of
+the machine idle whenever there were fewer columns than workers and a
+one-column frame entirely serial: a 250000 x 1 numeric frame measured 5.31 ms
+of `serialize (parallel)` on 32 workers, which is one worker's work.
+
+Columns big enough on their own are now cut into row pieces too. The split is
+decided by `rows_per_chunk` on that column's own work, so the thresholds that
+keep a small frame serial still apply, and the piece count is capped so that
+columns times pieces stays near the worker count rather than flooding the pool.
+Each piece carries its own punctuation -- the first opens the array, the rest
+begin with the separator, the last closes it -- so the pieces concatenate with
+nothing between them.
+
+| shape | before | after | |
+|---|---|---|---|
+| 250000 x 1, columns | 4.88 ms | 0.94 | **5.2x** |
+| 250000 x 2, columns | 5.37 | 1.69 | **3.2x** |
+| 125000 x 4, columns | 3.76 | 1.49 | **2.5x** |
+| 250000 x 1 strings, columns | 2.87 | 2.24 | 1.3x |
+| 20000 x 40, columns | 1.94 | 1.69 | 1.2x |
+| 5 x 3, columns | 0.105 | 0.101 | unchanged |
+| 250000 x 1, rows (control) | 1.01 | 0.95 | flat |
+
+### The default na mode stops dispatching four times per cell
+
+`na = "smart"` is the default, and it is what makes row-oriented output drop
+the key of a missing value rather than write null. Deciding that cost a
+separate pass over the cell: `col_is_missing` calls `col_available`, then
+matches on the column kind and loads the value; `write_col_value` then calls
+`col_available` again, matches again and loads again. Four dispatches and two
+loads to write one number.
+
+For the three kinds that dominate -- integer, double, logical -- the test and
+the write now come off one load. The fused tests are the exact negation of
+`col_is_missing`'s (`is_na_int`, `!is_finite`), so the two cannot drift, and
+the key is still written only after the decision is made: an earlier version
+pushed the key first and could bail out of the Factor and Char arms, leaving a
+dangling `"key":`, and that shape is not coming back.
+
+| | before | after | |
+|---|---|---|---|
+| 1-column frame, rows | 27.94 ns/row | 27.05 | -3.2% |
+| 2-column | 35.42 | 33.53 | -5.3% |
+| 3-column | 49.65 | 47.45 | -4.4% |
+| 4-column | 66.86 | 63.02 | -5.7% |
+| envelope per column | 5.53 | 4.70 | **-15%** |
+
+Bare vectors and the column- and value-oriented writers, none of which take
+this path, are flat within 2%.
+
+### The fixed-decimal writer stops paying for casts it cannot need
+
+`as` casts on floats saturate in Rust, and the clamping is not free. A
+disassembly of the built library showed `value as i64` costing six
+instructions past the conversion -- a compare against 9.22e18, a `movabs`, a
+`cmova`, a NaN check and a second `cmov` -- and `tmp as u32` costing a `maxsd`
+and a `minsd`, eight cycles of pure latency sitting directly on the floating
+point dependency chain.
+
+Neither clamp can ever fire. The single call site guarantees
+`1e-5 < |v| < FIXED_MAX[d] <= 1e17`, which is finite, not NaN (both
+comparisons reject it) and well inside `i64`; and `value - trunc(value)` is in
+`[0, 1)`, so the scaled fraction is in `[0, 10^prec)` and well inside `u32`.
+`to_int_unchecked` says so.
+
+Two smaller things from the same disassembly: every digit-pair store into the
+scratch array carried a bounds check and a panic branch, because `k`'s bound
+comes from the digit counts and LLVM cannot see it; and modp_dtoa2's final
+carry is unreachable in this port, since the trim leaves the fraction with
+exactly the digits the emission loops then consume.
+
+| | before | after | |
+|---|---|---|---|
+| integers (control) | 7.26 ns/value | 7.24 | flat |
+| doubles in (0, 1) | 19.58 | 17.70 | **-9.6%** |
+| doubles 1e6 to 1e9 | 29.27 | 24.39 | **-16.7%** |
+| epoch milliseconds | 37.39 | 29.38 | **-21.4%** |
+| coordinates, -125 to -66 | 25.86 | 21.50 | **-16.9%** |
+| `digits = 9` | 27.90 | 23.92 | **-14.3%** |
+| `digits = 0` | 17.89 | 16.14 | **-9.8%** |
+| 10000 polygons x 200 vertices | 30.35 | 27.86 | **-8.2%** |
+
+This is the default path, so it is every double in every column and every
+ordinate of every geometry.
+
+### `%g` reads its digits from ryu when that is provably the same answer
+
+`core::fmt` runs the exact (Dragon4) algorithm whatever precision is asked of
+it, so `write_g_format` cost about 100 ns per value at 5 significant digits and
+at 15 alike. ryu's shortest form costs about 35.
+
+Let `D` be that shortest form, with `nd` significant digits. `D` round-trips,
+so `|D - v| < ulp(v)/2`, which in units of its last digit is under
+`1.11e-16 * 10^nd` -- 0.11 units at 15 digits, 1.11 at 16, 11.1 at 17. So
+rounding `D` to `p` digits gives the same answer as rounding `v` unless the two
+straddle a half-way point, and that needs `D`'s discarded tail to be within
+that many units of exactly one half. The tail is an integer, so the test is
+exact; when it fails, `core::fmt` still runs.
+
+Two bounds fall out. Above `p = 15` it is not correct at all: with `nd <= p`
+there is no rounding, but `D` is only the answer if `v` rounded to `p` digits
+is `D` padded with zeros, which needs `ulp(v) <= u_p` and so `p <= 15`. It is
+why `%.17g` of 0.1 is `0.10000000000000001`. Above `p = 14` it stops paying:
+full-entropy doubles have 16- or 17-digit shortest forms, so `p = 15` falls
+back for 24% to 40% of values having already paid for ryu.
+
+| shape | before | after | |
+|---|---|---|---|
+| `digits = 4`, values below 1e-5 | 102.5 ns/value | 82.9 | **1.24x** |
+| `digits = 10` | 98.4 | 79.4 | **1.24x** |
+| `digits = 4`, values in (0, 1) | 20.2 | 20.4 | control |
+| `digits = NA` | 95.2 | 95.6 | unchanged by design |
+
+Subnormals are excluded. The whole argument rests on
+`ulp(v)/v <= 2.22e-16`, which is a property of normal doubles; for the smallest
+subnormal `ulp` *is* the value, so ryu's `5e-324` says nothing about `%.2g`,
+which is `4.9e-324`. That one value is what caught it.
+
+### The fixed-decimal writer covers the magnitudes people actually have
+
+A double is formatted either by a fixed-decimal writer or, outside its range,
+by `%.*g`. That range was `|v| < 2^31` for every `digits`, which sent entirely
+ordinary magnitudes down the `%g` path at five to six times the cost: epoch
+milliseconds (1.6e12), and any count or identifier above two billion.
+
+Fixed notation carries `int_digits + digits` significant digits while the `%g`
+fallback caps its precision at 17, so the two agree exactly while
+`|v| < 10^(17-digits)`. That is now the bound, per `digits` value:
+
+| | before | after | vs jsonlite |
+|---|---|---|---|
+| doubles in (0, 1) | 20.3 ns/value | 20.2 | 3.4x |
+| doubles 1e6 to 1e9 | 30.1 | 30.0 | 4.4x |
+| doubles 3e9 to 1e10 | 107.2 | 30.5 | 5.2x -> **17.7x** |
+| epoch milliseconds | 122.2 | 38.4 | 5.3x -> **16.6x** |
+
+`digits = 0` keeps the old bound. It is the one precision where the notation
+rule disagrees: `decimals` is `ceil(log10|v|)` there, which for an exact power
+of ten equals the exponent rather than exceeding it, and `%g` turns scientific
+as soon as the exponent reaches the precision -- so `%.10g` of 1e10 is `1e+10`
+where fixed notation writes `10000000000`. Only exact powers of ten are
+affected, and screening for them per value costs more than the mode is worth.
+
+Values below 1e-5 are unchanged at about 105 ns: `%g` renders those in
+scientific notation, which the fixed writer cannot express.
+
+`verify_numeric_parity.R` now checks the whole grid -- ten `digits` values by
+25 exponents, and a hundred groups sampled densely either side of every bound,
+including exact powers of ten, exact halves, integers and the next
+representable double.
+
+### Doubles are reversed eight bytes at a time
+
+`write_fixed_decimals` builds its digits least-significant-first and then
+reverses them into the output a byte at a time -- nine or ten dependent stores
+for a coordinate like `-120.1234`. A byte-swapped `u64` does eight at once, so
+a typical value becomes one load, one bswap, one shift and one store. Measured
+against an integer column as the untouched control:
+
+| | before | after | |
+|---|---|---|---|
+| integers (control) | 7.17 ns/value | 7.22 | +0.7% |
+| doubles in (0, 1) | 20.49 | 19.71 | -3.8% |
+| doubles like -120.1234 | 25.93 | 25.23 | -2.7% |
+| doubles 1e6 to 1e9 | 31.25 | 29.60 | -5.3% |
+| 10000 polygons x 200 vertices | 32.29 | 31.18 | -3.4% |
+
+### One geometry is now split across the pool
+
+A coordinate matrix above 131,072 ordinates is written in pieces across the
+worker pool. Splitting only between features did nothing for a layer whose work
+is one geometry -- a long track, a coastline, a detailed boundary.
+
+| | before | after | |
+|---|---|---|---|
+| 1 LineString, 2M coordinates | 560.18 ms | 186.69 ms | **3.00x** |
+| 1 Polygon, 1M coordinates | 280.31 ms | 93.22 ms | **3.01x** |
+| 8 LineStrings, 250k each | 167.83 ms | 117.99 ms | 1.42x |
+| 2000 LineStrings, 1k each | 102.33 ms | 103.23 ms | control |
+
+A 200-vertex ring is 400 ordinates, so ordinary layers never reach the
+threshold.
+
+### The recursive path now uses the worker pool
+
+Vectors, matrices and arrays handed straight to `as_json()` were serial however
+large they were: only the data.frame path had ever entered the pool. Long runs
+of doubles, integers and logicals are now split across it, measured with
+`as_bytes = TRUE` so R's string interning is not in the way:
+
+| shape (200,000 values) | before | after | |
+|---|---|---|---|
+| double vector | 21.1 ns/value | 3.9 | **5.4x** |
+| 20000 x 10 double matrix | 22.8 | 3.9 | **5.8x** |
+| 1000 x 20 x 10 double array | 23.2 | 4.3 | **5.4x** |
+| 20000 x 10 integer matrix | 9.3 | 3.5 | 2.7x |
+| 20000 x 10 logical matrix | 6.6 | 3.2 | 2.1x |
+
+3.9 ns/value is what the same formatting costs through the data.frame path, so
+the gap was parallelism and nothing else. Character vectors and lists stay
+serial: a `CHARSXP` needs encoding handling that allocates on R's vmax stack,
+and the list walk is the recursion itself. The split is on the outermost
+dimension, so a `2 x 20000` matrix parallelises over its two rows and a
+`20000 x 2` over its twenty thousand.
+
+`tools/bench/verify_parallel_parity.R` checks every shape three ways -- against
+`toJSON()`, and at one worker against many -- because the failure this could
+hide is a doubled or missing separator at a chunk boundary, which no small test
+would reach.
+
+### Column descriptors cost a fifth of what they did
+
+Building the descriptors asked extendr for an `Robj` per column and then asked
+that `Robj` `inherits()` up to six times. The constructor takes a global
+ownership mutex, inserts into a hash map and calls `Rf_protect`, with `Drop`
+taking the mutex again; each `inherits` fetched and walked the class attribute.
+Together they measured 0.62 us per column of pure setup, against about 30 ns to
+write a three-row integer column. Reading the class attribute once into the
+same bitset the recursive serializer already used, and reading the column
+pointer from `VECTOR_PTR_RO` instead, brings it to 0.12 us. Column names are
+escaped once into the descriptor's key rather than allocated as a name and then
+as a key.
+
+A frame small enough to need one chunk is now written straight into the output
+buffer, skipping the chunk vector, the join and a full copy.
+
+### Array columns of three dimensions or more
+
+Only two-dimensional integer and double matrix columns were described for the
+workers; three dimensions and up were rendered serially into an arena on the R
+thread, though the cells are the same pointer reads. A 1000 x 20 x 10 double
+array column cost 30.1 ns per value that way and now costs 4.5, which is what
+the matrix column costs. Character arrays still go through the arena: their
+cells need encoding handling that allocates on R's vmax stack.
+
+### Logical matrix columns are written by the workers
+
+Only integer and double matrix columns were described for the workers; a
+logical one was rendered serially into an arena on the R thread, though it
+needs no encoding at all. A 20000 x 10 logical matrix column went from 4.9 ms
+to 1.8 ms.
+
+`estimate_row_work` also counted a matrix column as one unit of work rather
+than one per matrix column, so a 2000-row frame carrying a 200-column numeric
+matrix scored 2000 -- below the threshold for using the pool at all. The shape
+the worker-side matrix writer exists for was the one kept in a single chunk. It
+now scales 2.9x where it scaled 1.0x.
 
 ### Date and POSIXct
 
@@ -304,16 +677,186 @@ sum over the chunk lengths, so they are disjoint by construction.
 
 `tools/bench/harness.R` reports the minimum of repeated timing blocks rather
 than the median, because background load only ever makes a measurement slower.
-Medians on the development machine drift by up to 18% run to run, which was
-enough to make a change that does nothing look like a 24% regression.
-`tools/bench/ab.sh` runs a benchmark against the committed sources and then the
-working copy, so both halves are measured the same way.
+### A nested `json` value could rewrite the document around it
 
-Two candidate optimisations were implemented, measured and reverted because
-they did nothing: specialised XY/XYZ/XYZM coordinate writers, since the loop
-body is an entire float formatter at ~40 ns and the bookkeeping removed is
-~1 ns; and unrolling the same loop over an array of cursors, which measured
-slower than the code it replaced.
+`json_verbatim = FALSE` is `toJSON()`'s default, and it is what makes a string
+carrying the `json` class an ordinary string, escaped like one, rather than
+text spliced into the output. We honoured it in R, which meant it reached only
+the outermost object: a `json` value nested anywhere was spliced whatever the
+setting.
+
+That is not only a formatting difference. Given
+
+```r
+v <- structure('1,"injected":true', class = "json")
+as_json(list(v = v))
+```
+
+`toJSON()` produces `{"v":["1,\"injected\":true"]}` and we produced
+`{"v":1,"injected":true}` -- a second key, from a string. The argument exists
+to prevent exactly that, so it now travels to the writer and applies at every
+depth and in data.frame columns.
+
+A `json` column under `dataframe = "columns"` is written whole rather than
+bracketed, since `asJSON("json")` returns its text verbatim and never collapses
+it into an array. `toJSON()` errors on such a column of more than one element,
+so there is nothing to match past one.
+
+Found by reading jsonlite's issue tracker, which is worth doing for the inputs
+people report rather than for the bugs: we claim byte-identical parity, so a
+jsonlite bug is ours to reproduce, not to fix.
+
+### `as_bytes` was undocumented
+
+`as_bytes = TRUE` returns the result as a raw vector instead of a character
+vector, skipping the string interning that is 65% to 82% of a large call. It
+has worked for some time but was missing from `?as_json`, whose `\value` also
+claimed a character vector unconditionally. Now documented there and in the
+README.
+
+Writing a 17.7 MB result to a file: 15 ms via `writeBin()` on the raw vector,
+117 ms via `writeLines()` on the character one, 488 ms via `jsonlite`. Below
+about a megabyte it makes no practical difference.
+
+For htmlwidgets -- `leaflet::addGeoJSON()`, `deckgl`, `mapdeck` -- use the
+default. A raw vector is base64-encoded into the widget payload, which the
+browser cannot use and which is 37% larger.
+
+### Errors no longer print a Rust panic trace
+
+extendr raises an R error by panicking with the message and catching it at the
+C boundary, so Rust's default hook printed three lines of
+`thread '<unnamed>' panicked at ...` ahead of every error, including ones
+raised deliberately. It looked like a crash. The hook is now silent -- every
+panic reaching it is already caught and surfaced as an R error -- and
+`FASTGEOJSON_PANIC_TRACE=1` restores it.
+
+`FASTGEOJSON_PROFILE=1` output goes through `REprintf` rather than the
+process's stderr, so `capture.output(type = "message")` and R's sinks now see
+it.
+
+`.Call` entry points are registered-symbol only (`R_forceSymbols`), so a
+mistyped one is a load-time error rather than a call-time one.
+
+A long run now notices Ctrl-C at its phase boundaries. R-exts: "No part of R
+can be interrupted whilst running long computations in compiled code", and
+nothing here checked. The poll goes through `R_ToplevelExec` so the interrupt
+cannot longjmp past Rust destructors. It does not reach inside a parallel
+region -- only the R thread may ask R anything -- so a single large chunk
+still runs to completion.
+
+### Four things the manuals said we were doing wrong
+
+None of these changes any output.
+
+* **`as_bytes = TRUE` now serialises past 2 GB.** The limit belongs to R
+  character strings, not raw vectors, but the guard sat above both.
+* **Re-encoded strings no longer accumulate.** `Rf_translateCharUTF8` allocates
+  on R's `R_alloc` stack, which is held until the call returns without
+  `vmaxset`; a large column kept a second copy of itself.
+* **An allocation failure raises an R condition** instead of aborting the
+  session, which `catch_unwind` could not have caught.
+* **`R_unload_fastgeojson`** stops the worker threads on `dyn.unload()`.
+
+### A latin1 column cost 93x what it needed to
+
+Every cell of a latin1 column went through `Rf_translateCharUTF8` on the R
+thread, one `iconv` call at a time. Bytes from 0xA0 up are their own code
+points, so the workers now widen those themselves.
+
+| 300,000 values, one column | before | after | |
+|---|---|---|---|
+| non-ASCII, marked latin1 | 815.43 ms | 8.76 ms | **93x** |
+
+`0x80..0x9F` still goes through R, because what "latin1" means there is
+platform-dependent -- CP1252 on Windows, the C1 controls through a strict
+ISO-8859-1 `iconv`, and 27 of the 256 bytes disagree. All 255 byte values are
+checked against `toJSON()` in `verify_string_parity.R`.
+
+### Text read from a file took the slow path
+
+Non-ASCII text from `readLines()` or `rawToChar()` is marked `CE_NATIVE` even
+in a UTF-8 locale, and the test for which cells the workers could read asked
+for the `CE_UTF8` mark specifically. All of it took the serial path. Now uses
+`Rf_charIsUTF8`, which R 4.5.0 added for this.
+
+| 300,000 values, one column | before | after |
+|---|---|---|
+| non-ASCII, marked unknown | 23.27 ms | 7.46 ms |
+
+Byte-identical output, and unchanged for ASCII (6.99 to 6.92 ms) and for text
+already marked UTF-8 (7.54 to 7.43).
+
+### Bytes that are not valid UTF-8 now match `toJSON()`
+
+R will hold a "string" whose bytes are not valid UTF-8 -- `rawToChar()` marks
+nothing, and `Encoding<-` does not validate. `toJSON()` emits those bytes
+unchanged; we raised an error. Now matched, in values, keys and factor levels.
+
+```r
+as_json(rawToChar(as.raw(0xe9)))
+#> ["\xe9"]            as toJSON() does; was an error
+```
+
+A `"bytes"`-marked string still raises `toJSON()`'s own message, which is the
+one input it does refuse. The result is built with `Rf_mkCharLenCE` rather
+than through a Rust `String`, which is what makes carrying those bytes
+possible and also drops a validation pass over the output.
+
+### A timestamp column could emit another column's values
+
+A data.frame with two or more `POSIXt` columns could emit the wrong timestamps
+-- the first column holding the second's values -- when a garbage collection
+landed mid-build. Reachable only through `df_json_str()`, which this release
+removes. Fixed, and covered by 21 assertions under `gctorture(TRUE)` in
+`tests/testthat/test-gctorture.R`.
+
+### An absent or repeated name produced an unusable key
+
+An empty, NA or repeated name is now rewritten as R rewrites it: the element's
+1-based index stands in for an absent name, then `make.unique` appends `.1`,
+`.2` and so on.
+
+```r
+as_json(list(a = 1, 2))
+#> {"a":[1],"2":[2]}        # was {"a":[1],"":[2]}
+```
+
+A data.frame with two columns called `a` emitted the key twice, which most
+parsers reduce to one member. Applies at every depth, to named lists and column
+names alike. Clean objects pay nothing for the check.
+
+### Testing
+
+The Rust crate has 61 unit tests of its own, over number formatting, escaping,
+key padding, date and timestamp arithmetic, parallel assembly, the pretty
+printer, the cell and coordinate writers, chunk planning and partitioning. They
+run in six seconds; previously every change had to go through a `cargo build`,
+an `R CMD INSTALL` and an R script to be judged at all. `tools/rust-test.sh`
+runs them -- `cargo test` alone will not link, because R ships only `R.dll`
+with no import library.
+
+### Measurement
+
+Two things on this platform distort benchmarks and are worth knowing if you run
+them yourself. Above 8 MiB of output every measurement costs about twice as
+much per byte -- 0.78 ns/byte below 2^23 and 1.64 above, because the heap
+serves allocations that large from the OS and pays to have fresh pages zeroed.
+And medians drift by up to 18% run to run, enough to invent a 24% regression.
+`tools/bench/ab.sh` runs a benchmark against the committed sources and then the
+working copy so both halves are measured the same way, and the harness reports
+the minimum of repeated blocks rather than the median.
+
+Several optimisations were implemented, measured and reverted for doing
+nothing: specialised XY/XYZ/XYZM coordinate writers; unrolling that loop over
+an array of cursors; emitting digits most-significant-first rather than
+reversing a scratch array (1.2% to 3.9% *slower*); and `#[inline(never)]` on
+the cold float-formatting branches. Two build-flag routes are unavailable
+here at all -- profile-guided optimisation, because both GNU ld and LLD pad
+the `$`-grouped PE sections LLVM's profile runtime uses to find its data, and
+`-C target-cpu=native`, which takes the baseline from SSE2 to AVX2/FMA/BMI and
+moves nothing. The hot loops are serial and branchy rather than
+arithmetic-bound.
 
 Against the fastest alternative for each shape (jsonlite, yyjsonr, jsonify,
 geojsonsf), on **wall-clock time for the same input**: faster on all 21

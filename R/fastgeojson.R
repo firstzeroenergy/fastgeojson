@@ -68,10 +68,28 @@
 #' @param ... Further arguments passed to the encoder, mirroring
 #'   `jsonlite::toJSON()`. Recognised here: `keep_vec_names`, `rownames`,
 #'   `json_verbatim`, `UTC`, `time_format`, `always_decimal`, `use_signif`,
-#'   `indent` and `sf`.
+#'   `indent`, `sf` and `as_bytes`.
+#'
+#'   `as_bytes = TRUE` is the one that is not a `toJSON()` argument. It
+#'   returns the same bytes as a **raw vector** instead of a character
+#'   vector, which skips R's string interning: building a character vector
+#'   makes R scan and hash every byte of the result to intern it in the
+#'   CHARSXP cache, at roughly a nanosecond per byte, and on a large result
+#'   that costs several times the serialization itself. Use it when the JSON
+#'   is on its way out of R -- `writeBin()` to a file or connection, an HTTP
+#'   response body, a socket. Writing a 17.7 MB result to a file takes 15 ms
+#'   through `writeBin()` against 117 ms through `writeLines()` on the
+#'   character result.
+#'
+#'   It is not a route to a string: `rawToChar()` pays the interning cost
+#'   back, and then some. It cannot be combined with `pretty`, which needs a
+#'   string to indent, and that combination is an error rather than a silent
+#'   fallback. The bytes are identical to the character result in every other
+#'   respect.
 #'
 #' @return A length-one character vector of class `"json"`, or
-#'   `c("geojson", "json")` for `sf` input.
+#'   `c("geojson", "json")` for `sf` input -- unless `as_bytes = TRUE`, which
+#'   returns an unclassed raw vector holding the same bytes.
 #'
 #' @seealso [fastgeojson_threads()] to control parallelism.
 #'
@@ -82,6 +100,13 @@
 #' df <- data.frame(x = c(1.5, 2.5), y = c("a", "b"))
 #' as_json(df)
 #' as_json(df, dataframe = "columns")
+#'
+#' # Straight out to a file, without interning the result as an R string.
+#' f <- tempfile()
+#' con <- file(f, "wb")
+#' writeBin(as_json(df, as_bytes = TRUE), con)
+#' close(con)
+#' unlink(f)
 #'
 #' if (requireNamespace("sf", quietly = TRUE)) {
 #'   nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
@@ -128,7 +153,10 @@ as_json <- function(
   always_decimal  <- isTRUE(dots$always_decimal)
   UTC             <- isTRUE(dots$UTC)
   time_format     <- dots$time_format
-  rownames        <- if (is.null(dots$rownames)) TRUE else isTRUE(dots$rownames)
+  # Three states, as toJSON() has: absent emits `_row` only for row names that
+  # are really there, TRUE emits it even for the automatic 1..n, FALSE never.
+  # Passed down rather than applied here, so a nested frame honours it too.
+  rownames        <- if (is.null(dots$rownames)) 1L else if (isTRUE(dots$rownames)) 2L else 0L
   use_signif      <- if (is.null(dots$use_signif)) inherits(digits, "AsIs") else isTRUE(dots$use_signif)
   strict_atomic   <- isTRUE(dots$strict_atomic)
   # as_bytes = TRUE returns a raw vector instead of a character vector.
@@ -196,7 +224,7 @@ as_json <- function(
     if (force) {
       if (has_rn) x[["_row"]] <- row.names(x)
       row.names(x) <- NULL
-    } else if (!has_rn || !rownames) {
+    } else if (!has_rn) {
       row.names(x) <- NULL
     }
   } else if (force && !inherits(x, "sf")) {
@@ -238,15 +266,21 @@ as_json <- function(
     }
   }
 
-  if (use_signif && !is.null(digits_int) && digits_int < 16L) {
-    x <- .apply_signif(x, digits_int)
-    digits_int <- NULL
+  # digits = I(n) counts SIGNIFICANT digits, which toJSON() renders with
+  # sprintf("%.*g"). Marking digits_int with the AsIs class carries that down
+  # to the writer, which has %.*g already; this used to signif() the whole
+  # object in R instead and then format the rounded values at 15 digits, which
+  # was wrong twice -- signif() rounds the binary value half-to-even where %g
+  # rounds the decimal expansion, and 15 digits never selects scientific
+  # notation, so 12345 at I(4) came out as 12340 against toJSON()'s 1.234e+04.
+  if (use_signif && !is.null(digits_int) && digits_int >= 0L && digits_int <= 17L) {
+    digits_int <- I(digits_int)
   }
 
   # ---- dispatch --------------------------------------------------------
   res <- if (inherits(x, "sf") && sf_mode != "dataframe") {
     .as_json_class(
-      sf_geojson_str_impl(x, auto_unbox, na, null, factor, digits_int, sf_mode, always_decimal, matrix == "columnmajor", as_bytes),
+      sf_geojson_str_impl(x, auto_unbox, na, null, factor, digits_int, sf_mode, always_decimal, matrix == "columnmajor", rownames, json_verbatim, as_bytes),
       geo = identical(sf_mode, "geojson")
     )
   } else if (complex_cols) {
@@ -256,8 +290,9 @@ as_json <- function(
     cols <- lapply(unclass(x), function(col) {
       if (is.complex(col)) list(real = Re(col), imaginary = Im(col)) else col
     })
-    .as_json_class(obj_json_str_impl(cols, auto_unbox, na, null, factor,
-                                     digits_int, always_decimal, FALSE, as_bytes))
+    .as_json_class(obj_json_str_impl(cols, auto_unbox, dataframe, na, null, factor,
+                                     digits_int, always_decimal, FALSE, rownames,
+                                     json_verbatim, as_bytes))
   } else if (inherits(x, "data.frame")) {
     # sf = "dataframe" is jsonlite's callNextMethod(): serialise the frame
     # normally and let the geometry column render as typed geometry objects
@@ -266,10 +301,10 @@ as_json <- function(
     if (nrow(x) == 0L && dataframe == "rows") {
       if (as_bytes) charToRaw("[]") else .as_json_class("[]")
     } else {
-      .as_json_class(df_json_str_impl(x, auto_unbox, dataframe, na, null, factor, digits_int, always_decimal, matrix == "columnmajor", as_bytes))
+      .as_json_class(df_json_str_impl(x, auto_unbox, dataframe, na, null, factor, digits_int, always_decimal, matrix == "columnmajor", rownames, json_verbatim, as_bytes))
     }
   } else {
-    .as_json_class(obj_json_str_impl(x, auto_unbox, na, null, factor, digits_int, always_decimal, matrix == "columnmajor", as_bytes))
+    .as_json_class(obj_json_str_impl(x, auto_unbox, dataframe, na, null, factor, digits_int, always_decimal, matrix == "columnmajor", rownames, json_verbatim, as_bytes))
   }
 
   if (as_bytes) return(res)
@@ -498,7 +533,7 @@ is_true_na <- function(v) {
   # paste0() recycles a zero-length argument to "", so guard explicitly or a
   # zero-length input yields the bogus '{"$date":}'.
   if (!length(ms)) {
-    return(structure(if (isTRUE(opts$in_df)) character(0) else "[]", class = "json"))
+    return(structure(if (isTRUE(opts$in_df)) character(0) else "[]", class = "fgjson"))
   }
   miss <- is.na(ms)
   txt <- paste0('{"$date":', format(ms, scientific = FALSE, trim = TRUE), "}")
@@ -509,10 +544,10 @@ is_true_na <- function(v) {
                         string = '"NA"',
                         null   = "null",
                         NA_character_)
-    return(structure(txt, class = "json"))
+    return(structure(txt, class = "fgjson"))
   }
   txt[miss] <- if (identical(opts$na, "string")) '"NA"' else "null"
-  structure(paste0("[", paste(txt, collapse = ","), "]"), class = "json")
+  structure(paste0("[", paste(txt, collapse = ","), "]"), class = "fgjson")
 }
 
 # MongoDB extended JSON for a raw vector: {"$binary":..., "$type":...}
@@ -521,7 +556,7 @@ is_true_na <- function(v) {
   if (!length(ty)) ty <- 5
   structure(
     paste0('{"$binary":"', .base64(v), '","$type":"', as.character(ty), '"}'),
-    class = "json"
+    class = "fgjson"
   )
 }
 
@@ -542,7 +577,7 @@ is_true_na <- function(v) {
   b <- part("imaginary", im)
   inner <- ifelse(is.na(a), ifelse(is.na(b), "", b),
                   ifelse(is.na(b), a, paste0(a, ",", b)))
-  structure(paste0("{", inner, "}"), class = "json")
+  structure(paste0("{", inner, "}"), class = "fgjson")
 }
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
@@ -576,7 +611,10 @@ is_true_na <- function(v) {
     mongo  = .encode_raw_mongo(v),
     hex    = as.character(as.hexmode(as.integer(v))),
     int    = as.integer(v),
-    js     = .as_json_class(paste0("(new Uint8Array(", .compact_ints(as.integer(v)), "))")),
+    # Pre-rendered JavaScript, not a string: marked fgjson so it is spliced
+    # whatever json_verbatim says, since it is ours and not the user's.
+    js     = structure(paste0("(new Uint8Array(", .compact_ints(as.integer(v)), "))"),
+                       class = "fgjson"),
     .base64(v)
   )
 }
@@ -603,19 +641,6 @@ is_true_na <- function(v) {
   paste(out, collapse = "")
 }
 
-.apply_signif <- function(x, digits) {
-  if (is.list(x)) {
-    if (inherits(x, "sfc")) return(x)
-    x[] <- lapply(x, function(col) {
-      if (is.numeric(col) && !is.integer(col)) signif(col, digits)
-      else if (is.list(col)) .apply_signif(col, digits)
-      else col
-    })
-    return(x)
-  }
-  if (is.numeric(x) && !is.integer(x)) return(signif(x, digits))
-  x
-}
 
 .pretty <- function(s, pretty) {
   indent <- if (isTRUE(pretty)) 2L else as.integer(pretty)
@@ -663,40 +688,4 @@ fastgeojson_threads <- function(n = NULL) {
   threads_impl(NULL)
 }
 
-# ------------------------------------------------------------------
-# Legacy entry points
-# ------------------------------------------------------------------
 
-#' Direct encoders for `sf` objects and data frames
-#'
-#' @description
-#' Thin wrappers over the Rust encoders. `as_json()` is preferred; these are
-#' retained for backward compatibility and skip `as_json()`'s argument
-#' handling, so they do not perform `Date`/`POSIXt`/`complex`/`raw`
-#' pre-encoding.
-#'
-#' @param x An `sf` object (`sf_geojson_str`) or a data frame (`df_json_str`).
-#' @param auto_unbox,na,null,factor,digits As in [as_json()].
-#' @param dataframe `"rows"` or `"columns"`.
-#'
-#' @return A length-one character vector of class `"json"`, or
-#'   `c("geojson", "json")` for `sf_geojson_str()`.
-#'
-#' @examples
-#' df_json_str(data.frame(a = 1:2))
-#'
-#' @name legacy-encoders
-#' @export
-sf_geojson_str <- function(x, auto_unbox = FALSE, na = "smart", null = "list",
-                           factor = "string", digits = NULL) {
-  if (!inherits(x, "sf")) stop("Not an sf object", call. = FALSE)
-  sf_geojson_str_impl(x, auto_unbox, na, null, factor, digits, "geojson", FALSE, FALSE)
-}
-
-#' @rdname legacy-encoders
-#' @export
-df_json_str <- function(x, auto_unbox = FALSE, dataframe = "rows", na = "smart",
-                        null = "list", factor = "string", digits = NULL) {
-  if (!inherits(x, "data.frame")) stop("Not a data.frame", call. = FALSE)
-  df_json_str_impl(x, auto_unbox, dataframe, na, null, factor, digits, FALSE, FALSE)
-}

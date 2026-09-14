@@ -49,11 +49,36 @@ pub(crate) fn under_r_check() -> bool {
 /// Precedence: an explicit `fastgeojson_threads(n)`, then the usual
 /// thread-count environment variables, then two if we are being checked, then
 /// the whole machine. Normal user code therefore gets full parallelism.
+/// The resolved default width, cached. 0 means "not yet worked out".
+///
+/// Resolving it reads four environment variables, calls
+/// `available_parallelism`, and — through `under_r_check` — snapshots the
+/// entire environment with `env::vars_os()`. That ran on every call to
+/// `desired_threads`, which happens about six times per serialization, for a
+/// value that cannot change during a session. `fastgeojson_threads()` clears
+/// it, so an explicit request still takes effect immediately.
+static DEFAULT_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn invalidate_thread_cache() {
+    DEFAULT_THREADS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn desired_threads() -> usize {
     let req = REQUESTED_THREADS.load(std::sync::atomic::Ordering::Relaxed);
     if req > 0 {
         return req;
     }
+    let cached = DEFAULT_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+    if cached > 0 {
+        return cached;
+    }
+    let n = resolve_default_threads();
+    DEFAULT_THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+    n
+}
+
+fn resolve_default_threads() -> usize {
     for key in [
         "FASTGEOJSON_NUM_THREADS",
         "RAYON_NUM_THREADS",
@@ -87,6 +112,9 @@ pub(crate) fn desired_threads() -> usize {
 /// too small to be worth a pool, otherwise give every worker several chunks so
 /// one straggler cannot stall the join, and never make a chunk so small that
 /// scheduling dominates.
+/// Below this much total work the pool costs more than it saves.
+pub(crate) const MIN_PARALLEL_WORK: usize = 32_768;
+
 pub(crate) fn rows_per_chunk(n_rows: usize, work_per_row: usize) -> usize {
     if n_rows <= 1 {
         return n_rows.max(1);
@@ -98,8 +126,6 @@ pub(crate) fn rows_per_chunk(n_rows: usize, work_per_row: usize) -> usize {
     let w = work_per_row.max(1);
     let total = n_rows.saturating_mul(w);
 
-    // Below this the pool costs more than it saves.
-    const MIN_PARALLEL_WORK: usize = 32_768;
     if total < MIN_PARALLEL_WORK {
         return n_rows;
     }
@@ -118,32 +144,41 @@ pub(crate) fn rows_per_chunk(n_rows: usize, work_per_row: usize) -> usize {
 /// though each row is two orders of magnitude more work than a numeric one.
 /// String columns are sampled rather than measured, so this stays O(1) in the
 /// column length.
-pub(crate) fn estimate_row_work(props: &[(Vec<u8>, ThreadSafeColumn)]) -> usize {
+pub(crate) fn estimate_row_work(props: &[(Key, ThreadSafeColumn)]) -> usize {
     let mut w = 0usize;
     for (key, col) in props {
         w += 1 + key.len() / 8;
         w += match col.kind {
-            ColumnType::CharDirect => unsafe {
-                let base = col.data_ptr as *const libR_sys::SEXP;
-                let n = col.len;
-                if n == 0 {
-                    1
-                } else {
-                    let sample = n.min(16);
-                    let step = (n / sample).max(1);
-                    let mut total = 0usize;
-                    let mut seen = 0usize;
-                    let mut i = 0usize;
-                    while i < n && seen < sample {
-                        let cs = *base.add(i);
-                        if !is_na_string(cs) {
-                            total += libR_sys::Rf_xlength(cs).max(0) as usize;
-                        }
-                        seen += 1;
-                        i += step;
+            // The prepass already recorded each cell's byte length in the low
+            // 30 bits of its descriptor, so the sample reads those instead of
+            // chasing 16 CHARSXPs back through Rf_xlength.
+            ColumnType::CharDirect => match col.char_meta {
+                Some(ref m) => sampled_mean(m.len(), |i| {
+                    let d = m[i];
+                    // An arena cell's payload is an index, not a length.
+                    if d == CD_NA || d & CD_ARENA != 0 {
+                        None
+                    } else {
+                        // A latin1 cell widens, so it emits up to twice
+                        // the bytes R holds.
+                        Some(if d & CD_LATIN1 != 0 {
+                            ((d & CD_LEN) as usize) * 2
+                        } else {
+                            (d & CD_LEN) as usize
+                        })
                     }
-                    ((total / seen.max(1)) / 4).max(1)
-                }
+                }),
+                None => unsafe {
+                    let base = col.data_ptr as *const libR_sys::SEXP;
+                    sampled_mean(col.len, |i| {
+                        let cs = *base.add(i);
+                        if is_na_string(cs) {
+                            None
+                        } else {
+                            Some(libR_sys::Rf_xlength(cs).max(0) as usize)
+                        }
+                    })
+                },
             },
             ColumnType::Char | ColumnType::JsonRaw => match col.string_arena {
                 Some(ref a) if !a.offsets.is_empty() => {
@@ -151,10 +186,46 @@ pub(crate) fn estimate_row_work(props: &[(Vec<u8>, ThreadSafeColumn)]) -> usize 
                 }
                 _ => 1,
             },
+            // A matrix column emits one number per matrix column, not one per
+            // row. Counting it as 1 put a 2000-row frame carrying a 200-column
+            // numeric matrix -- 400000 values -- at 2000 units, below
+            // MIN_PARALLEL_WORK, so the shape the worker-side matrix writer
+            // exists for was the one kept in a single chunk.
+            ColumnType::MatrixReal | ColumnType::MatrixInt | ColumnType::MatrixBool => {
+                col.aux as usize
+            }
+            ColumnType::ArrayDirect => match col.arr_shape {
+                Some(ref v) => v[..v.len() / 2].iter().product::<usize>().max(1),
+                None => 1,
+            },
             _ => 1,
         };
     }
     w.max(1)
+}
+
+/// Mean of up to 16 samples spread across `n`, in units of four bytes.
+///
+/// `f` returns None for a cell that carries no length (an NA, or a cell held
+/// in the arena rather than read directly).
+#[inline]
+fn sampled_mean(n: usize, f: impl Fn(usize) -> Option<usize>) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let sample = n.min(16);
+    let step = (n / sample).max(1);
+    let mut total = 0usize;
+    let mut seen = 0usize;
+    let mut i = 0usize;
+    while i < n && seen < sample {
+        if let Some(len) = f(i) {
+            total += len;
+        }
+        seen += 1;
+        i += step;
+    }
+    ((total / seen.max(1)) / 4).max(1)
 }
 
 /// Cheap per-feature work estimate for a geometry column.
@@ -201,6 +272,50 @@ pub(crate) unsafe fn estimate_geom_work(geom_col: libR_sys::SEXP, n: usize) -> u
     (total / seen.max(1)).max(1)
 }
 
+/// Stops Rust's default panic hook printing to the process's stderr.
+///
+/// extendr transports an `Err` out of a `#[extendr]` function by panicking
+/// with the message and catching it at the C boundary, so the default hook
+/// printed three lines of "thread '<unnamed>' panicked at ..." ahead of every
+/// ordinary R error -- including ones we raise deliberately, like jsonlite's
+/// own "bytes" refusal. It looked like a crash and it was not.
+///
+/// Nothing is lost by silencing it. Every panic that can reach here is
+/// already caught: the entry points wrap their work in `catch_unwind` and
+/// turn a real one into an "Internal panic:" R error, the pool closures do
+/// the same for workers, and extendr's own is carrying a message it is about
+/// to raise. The hook print was pure duplication, on a stream R-exts says
+/// compiled code should not be writing to at all.
+///
+/// `FASTGEOJSON_PANIC_TRACE=1` keeps the default hook, for when the R-level
+/// message is not enough and a backtrace is wanted.
+#[no_mangle]
+pub extern "C" fn fastgeojson_quiet_panics() {
+    if std::env::var_os("FASTGEOJSON_PANIC_TRACE").is_some() {
+        return;
+    }
+    std::panic::set_hook(Box::new(|_| {}));
+}
+
+/// Drops the worker pool, which terminates and joins its threads.
+///
+/// Called from `R_unload_fastgeojson`. R-exts 5.4 documents the hook: "when
+/// unloading the object, R looks for a routine named R_unload_lib ... R will
+/// invoke it and pass it a single argument describing the DLL". Without it,
+/// `dyn.unload()` pulled the code out from under thirty-two live threads,
+/// which is a crash waiting for the next `library(fastgeojson)`.
+#[no_mangle]
+pub extern "C" fn fastgeojson_release_pool() {
+    let taken = {
+        let mut guard = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        guard.take()
+    };
+    // Dropped outside the lock: the Arc's destructor joins the workers, and
+    // holding the mutex across that would deadlock anything still inside
+    // with_pool.
+    drop(taken);
+}
+
 /// Runs `f` on our own pool, rebuilding it if the requested width changed.
 ///
 /// Single-threaded requests skip rayon entirely, which is also what makes
@@ -230,10 +345,125 @@ pub(crate) fn with_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         guard.as_ref().map(|(_, p)| std::sync::Arc::clone(p))
     };
     match pool {
-        Some(p) => p.install(f),
-        // Pool construction failed (thread limit reached, say). Running
-        // inline is slower but always correct.
+        // Pool construction failed -- the thread limit reached, say. The
+        // closure still produces the right bytes, but `into_par_iter` inside
+        // it now runs on rayon's global pool, so this is the one case where
+        // the requested width is not honoured. There is nothing better to fall
+        // back to: refusing to serialise would be worse than serialising at
+        // the wrong width.
         None => f(),
+        Some(p) => p.install(f),
     }
 }
 
+// ------------------------------------------------------------------
+// TESTS
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_jobs_stay_in_one_chunk() {
+        // Below MIN_PARALLEL_WORK the pool costs more than it saves, so the
+        // answer must be the whole range whatever the worker count.
+        assert_eq!(rows_per_chunk(0, 1), 1);
+        assert_eq!(rows_per_chunk(1, 1), 1);
+        assert_eq!(rows_per_chunk(10, 1), 10);
+        assert_eq!(rows_per_chunk(1000, 1), 1000);
+        // Work per row is what decides it, not the row count: a short but very
+        // wide frame has to be split, a long thin one need not be.
+        assert!(rows_per_chunk(2000, 200) < 2000);
+        assert_eq!(rows_per_chunk(2000, 1), 2000);
+    }
+
+    #[test]
+    fn chunks_cover_the_range_exactly() {
+        for &n in &[1usize, 2, 7, 1000, 32_768, 40_009, 1_000_000] {
+            for &w in &[1usize, 4, 200] {
+                let cs = rows_per_chunk(n, w);
+                assert!(cs >= 1, "n {} w {} gave {}", n, w, cs);
+                let chunks = (n + cs - 1) / cs;
+                assert!(chunks >= 1);
+                // Every row lands in exactly one chunk.
+                assert!((chunks - 1) * cs < n.max(1));
+            }
+        }
+    }
+
+
+    #[test]
+    fn row_work_counts_what_a_row_actually_emits() {
+        // The estimate is what decides whether the pool is used at all, so a
+        // kind that emits many values per row has to say so. A matrix column
+        // counted as one unit put a 2000-row frame carrying a 200-column
+        // matrix below the threshold.
+        let key = Key::from_name(b"x");
+        let mk = |kind: ColumnType, aux: u32| {
+            vec![(
+                Key::from_name(b"x"),
+                ThreadSafeColumn {
+                    kind,
+                    aux,
+                    data_ptr: 0,
+                    len: 10,
+                    cached_levels: None,
+                    string_arena: None,
+                    char_meta: None,
+                    arr_shape: None,
+                },
+            )]
+        };
+        let _ = key;
+        let plain = estimate_row_work(&mk(ColumnType::Real, 0));
+        let matrix = estimate_row_work(&mk(ColumnType::MatrixReal, 200));
+        assert!(
+            matrix >= plain + 190,
+            "a 200-wide matrix column scored {} against a plain column's {}",
+            matrix,
+            plain
+        );
+        // Logical and integer matrices count the same way.
+        assert_eq!(matrix, estimate_row_work(&mk(ColumnType::MatrixInt, 200)));
+        assert_eq!(matrix, estimate_row_work(&mk(ColumnType::MatrixBool, 200)));
+        // An array column counts the product of its trailing dimensions.
+        let mut arr = mk(ColumnType::ArrayDirect, ARR_REAL);
+        arr[0].1.arr_shape = Some(vec![3usize, 4, 1, 3].into_boxed_slice());
+        assert!(estimate_row_work(&arr) >= plain + 11);
+        // Never zero, whatever the column.
+        assert!(estimate_row_work(&mk(ColumnType::Null, 0)) >= 1);
+        assert!(estimate_row_work(&[]) >= 1);
+    }
+
+    #[test]
+    fn a_long_key_costs_more_than_a_short_one() {
+        let one = |n: &[u8]| {
+            estimate_row_work(&[(
+                Key::from_name(n),
+                ThreadSafeColumn {
+                    kind: ColumnType::Real,
+                    aux: 0,
+                    data_ptr: 0,
+                    len: 1,
+                    cached_levels: None,
+                    string_arena: None,
+                    char_meta: None,
+                    arr_shape: None,
+                },
+            )])
+        };
+        assert!(one(&[b'k'; 80]) > one(b"k"));
+    }
+
+    #[test]
+    fn sampled_mean_is_bounded_and_never_zero() {
+        assert_eq!(sampled_mean(0, |_| Some(100)), 1);
+        // Quarter-bytes, floored at one.
+        assert_eq!(sampled_mean(10, |_| Some(0)), 1);
+        assert_eq!(sampled_mean(10, |_| Some(40)), 10);
+        assert_eq!(sampled_mean(10, |_| None), 1);
+        // Sampling is capped, so a huge column costs the same as a small one.
+        assert_eq!(sampled_mean(1_000_000, |_| Some(40)), 10);
+    }
+}

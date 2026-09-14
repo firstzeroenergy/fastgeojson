@@ -6,7 +6,7 @@
 
 `fastgeojson` converts `sf` objects to GeoJSON FeatureCollections and generic R objects (`data.frame`, lists, vectors) to JSON strings.
 
-Implemented in Rust via **extendr**, it delivers **12–19× speedups** over existing R solutions on large datasets, with output byte-for-byte identical to `jsonlite::toJSON()`.
+Implemented in Rust via **extendr**, it delivers **12–17× speedups** over existing R solutions on large datasets, with output byte-for-byte identical to `jsonlite::toJSON()`.
 
 Results are ready for Shiny, Plumber, `leaflet::addGeoJSON()`, and any package that talks to JavaScript.
 
@@ -20,32 +20,40 @@ Fastest of 7 runs, **default arguments for every package**. Reproduce with `Rscr
 
 |Package                | Time_ms| Output_MB|Speedup vs jsonlite |
 |:----------------------|-------:|---------:|:-------------------|
-|jsonify                |    1345|      61.1|0.9×                |
-|jsonlite               |    1145|      49.4|—                   |
-|yyjsonr                |     233|      61.1|4.9×                |
-|fastgeojson (1 thread) |     180|      49.4|6.4×                |
-|fastgeojson            |      61|      49.4|18.8×               |
+|jsonify                |    1308|      61.1|0.9×                |
+|jsonlite               |    1126|      49.4|—                   |
+|yyjsonr                |     230|      61.1|4.9×                |
+|fastgeojson (1 thread) |     161|      49.4|7.0×                |
+|fastgeojson            |      61|      49.4|18.5×               |
 
 ### 1 million point features
 
 |Package                | Time_ms| Output_MB|Speedup vs geojsonsf |
 |:----------------------|-------:|---------:|:--------------------|
-|geojsonsf              |    1948|     150.8|—                    |
-|yyjsonr                |     586|     150.8|3.3×                 |
-|fastgeojson (1 thread) |     395|     119.8|4.9×                 |
-|fastgeojson            |     162|     119.8|12.0×                |
+|geojsonsf              |    1838|     150.8|—                    |
+|yyjsonr                |     576|     150.8|3.2×                 |
+|fastgeojson (1 thread) |     354|     119.8|5.2×                 |
+|fastgeojson            |     149|     119.8|12.3×                |
 
 ### 10,000 polygons × 200 vertices
 
 |Package     | Time_ms| Output_MB|Speedup vs geojsonsf |
 |:-----------|-------:|---------:|:--------------------|
-|geojsonsf   |     607|      76.4|—                    |
-|yyjsonr     |     248|      76.4|2.4×                 |
-|fastgeojson |      47|      37.6|12.9×                |
+|geojsonsf   |     595|      76.4|—                    |
+|yyjsonr     |     244|      76.4|2.4×                 |
+|fastgeojson |      46|      37.6|12.9×                |
 
 Output size is shown because packages that write shortest-round-trip numbers emit larger payloads for the same input; `fastgeojson` matches `jsonlite` exactly.
 
-`as_bytes = TRUE` is 4.2× to 6.5× faster again on these shapes, because most of what remains is R interning the result into a character vector.
+Most of what is left in those figures is not serialization. The same calls with `as_bytes = TRUE`, which returns the bytes without interning them as an R string, separate the two:
+
+| | full call | `as_bytes = TRUE` | R's share |
+|---|---|---|---|
+| 1M × 4 columns | 54.3 ms | 12.6 ms | 77% |
+| 1M point features | 125.1 ms | 22.6 ms | 82% |
+| 10k polygons | 6.9 ms | 2.4 ms | 65% |
+
+R charges about a nanosecond per byte to build a character vector, because it scans and hashes every byte to intern it in the CHARSXP cache. No serializer can go under that: *R Internals* requires every CHARSXP to be made through `mkCharLenCE`. See [`as_bytes`](#as_bytes) for when you can skip it entirely.
 
 ## Correctness
 
@@ -116,7 +124,7 @@ as_json(
 )
 ```
 
-`as_json()` detects the input type and dispatches to the appropriate encoder. Returns a length-one character vector of class `"json"`, or `c("geojson", "json")` for `sf` input.
+`as_json()` is the only encoder. It detects the input type and returns a length-one character vector of class `"json"`, or `c("geojson", "json")` for `sf` input — or a raw vector with `as_bytes = TRUE`.
 
 Two options go beyond `toJSON()`:
 
@@ -127,11 +135,26 @@ as_json(x, as_bytes = TRUE)   # a raw vector instead of a character vector
 
 `digits = Inf` is the only lossless setting; `digits = NA` matches `toJSON()`, which keeps 15 significant digits, so `pi` becomes `3.14159265358979`.
 
-`as_bytes = TRUE` skips R's string interning, which hashes every byte of the result and costs more than the serialization itself. Use it when the JSON is headed for a socket or a file rather than for R code.
-
 `fastgeojson_threads(n)` sets the worker count: `1` disables parallelism, `0` restores automatic. The default is the whole machine, honouring `FASTGEOJSON_NUM_THREADS`, `RAYON_NUM_THREADS`, `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT`. Output is identical at any thread count.
 
-`sf_geojson_str()` and `df_json_str()` remain available for direct dispatch.
+### as_bytes {#as_bytes}
+
+Returns the same bytes as a raw vector instead of a character vector, skipping the interning that is 65-82% of a large call. Use it when the JSON is leaving R and never needs to be an R string:
+
+```r
+con <- file("out.json", "wb")                          # a file
+writeBin(as_json(x, as_bytes = TRUE), con); close(con)
+
+res$body <- as_json(x, as_bytes = TRUE)                # httpuv, plumber, shiny
+httr2::req_body_raw(req, as_json(x, as_bytes = TRUE), "application/json")
+writeBin(as_json(x, as_bytes = TRUE), gzfile("out.json.gz", "wb"))
+```
+
+Writing a 17.7 MB result to a file takes 15 ms this way, against 117 ms through `writeLines()` on the character result and 488 ms through `jsonlite`. The character route pays the interning and then walks the string again.
+
+Below about a megabyte of output it is not worth thinking about. It is not a route to a string, since `rawToChar()` pays the cost straight back, and `pretty` needs a string to indent, so that combination is an error rather than a silent fallback.
+
+For **htmlwidgets — `leaflet::addGeoJSON()`, `deckgl`, `mapdeck` — use the default.** Its `"json"` class is what makes htmlwidgets splice the text into the widget payload verbatim; a raw vector is base64-encoded instead, which the browser cannot use and which is 37% larger. `as_bytes` fits the other pattern, where the map fetches the GeoJSON from a URL rather than carrying it inline.
 
 ## Usage
 
@@ -201,7 +224,7 @@ The full `jsonlite::toJSON()` argument surface is supported.
 ## Implementation
 
 - **Work-aware parallel chunking** — chunk size comes from estimated work (columns, sampled string lengths, sampled geometry cost), so wide frames and polygon layers parallelise as readily as tall numeric ones. Small inputs stay serial.
-- **Number formatting matched to `jsonlite`** — the fixed-precision path ports the same `modp_dtoa2` algorithm, so output agrees by construction; `ryu` covers `digits = NA`.
+- **Number formatting matched to `jsonlite`** — the fixed-decimal path ports the same `modp_dtoa2` algorithm, so output agrees by construction; `%g` supplies the rest, taking its digits from `ryu` where rounding them provably gives the same answer, and `digits = Inf` is `ryu` outright.
 - **Strings escaped in place** — where a column's bytes are already valid UTF-8, workers escape R's `CHARSXP` data directly, copying each string once, in parallel.
 - **Table-driven escaping** — a 256-entry table probed eight bytes at a time, so a clean string costs one scan and one bulk copy.
 - **Direct access to R vectors** — raw pointers into `INTEGER`, `REAL`, `LOGICAL`, `STRING_PTR_RO`, with lengths carried alongside.

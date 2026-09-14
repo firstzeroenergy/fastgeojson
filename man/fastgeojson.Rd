@@ -69,11 +69,29 @@ error. \code{sf} objects are exempt so geometry handling is preserved.}
 \item{...}{Further arguments passed to the encoder, mirroring
 \code{jsonlite::toJSON()}. Recognised here: \code{keep_vec_names}, \code{rownames},
 \code{json_verbatim}, \code{UTC}, \code{time_format}, \code{always_decimal}, \code{use_signif},
-\code{indent} and \code{sf}.}
+\code{indent}, \code{sf} and \code{as_bytes}.
+
+\code{as_bytes = TRUE} is the one that is not a \code{toJSON()} argument. It
+returns the same bytes as a \strong{raw vector} instead of a character
+vector, which skips R's string interning: building a character vector
+makes R scan and hash every byte of the result to intern it in the
+CHARSXP cache, at roughly a nanosecond per byte, and on a large result
+that costs several times the serialization itself. Use it when the JSON
+is on its way out of R -- \code{writeBin()} to a file or connection, an HTTP
+response body, a socket. Writing a 17.7 MB result to a file takes 15 ms
+through \code{writeBin()} against 117 ms through \code{writeLines()} on the
+character result.
+
+It is not a route to a string: \code{rawToChar()} pays the interning cost
+back, and then some. It cannot be combined with \code{pretty}, which needs a
+string to indent, and that combination is an error rather than a silent
+fallback. The bytes are identical to the character result in every other
+respect.}
 }
 \value{
 A length-one character vector of class \code{"json"}, or
-\code{c("geojson", "json")} for \code{sf} input.
+\code{c("geojson", "json")} for \code{sf} input -- unless \code{as_bytes = TRUE}, which
+returns an unclassed raw vector holding the same bytes.
 }
 \description{
 \code{as_json()} is a high-performance, drop-in replacement for
@@ -119,6 +137,13 @@ as_json(list(val = 5), auto_unbox = TRUE)
 df <- data.frame(x = c(1.5, 2.5), y = c("a", "b"))
 as_json(df)
 as_json(df, dataframe = "columns")
+
+# Straight out to a file, without interning the result as an R string.
+f <- tempfile()
+con <- file(f, "wb")
+writeBin(as_json(df, as_bytes = TRUE), con)
+close(con)
+unlink(f)
 
 if (requireNamespace("sf", quietly = TRUE)) {
   nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)

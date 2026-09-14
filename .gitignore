@@ -8,6 +8,9 @@
 
 # Build artefacts
 src/rust/target/
+# R CMD build / check output
+*.tar.gz
+*.Rcheck/
 src/rust/vendor/
 src/rust/.cargo/
 src/*.o

@@ -13,7 +13,7 @@ test_that("as_json serializes data.frames correctly", {
   expect_equal(parsed$val, df$val)
 })
 
-test_that("df_json_str handles NAs correctly", {
+test_that("a data.frame handles NAs correctly", {
   df <- data.frame(a = c(1, NA), b = c("x", NA))
   json <- as_json(df)
 

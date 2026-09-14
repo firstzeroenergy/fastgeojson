@@ -1,5 +1,5 @@
 ^\.git$
-^\.gitignore$
+\.gitignore$
 ^\.gitattributes$
 ^\.github$
 ^\.claude$
@@ -33,3 +33,4 @@
 ^src/rust/vendor-config\.toml$
 ^tools/bench$
 ^tools/build_readme\.R$
+^tools/rust-test\.sh$

@@ -1,2 +1,3 @@
 EXPORTS
 R_init_fastgeojson
+R_unload_fastgeojson

@@ -71,6 +71,43 @@ pub(crate) unsafe fn is_plain_real(x: libR_sys::SEXP) -> bool {
     typeof_sexp(x) == libR_sys::SEXPTYPE::REALSXP as u32 && ALTREP(x) == 0
 }
 
+/// Is `x` a double vector we may read once we are on the R thread?
+///
+/// Same as `is_plain_real` but ALTREP is allowed. `REAL()` on an ALTREP vector
+/// may materialise it, which allocates and can run R code — fine here, fatal
+/// in a worker.
+#[inline]
+pub(crate) unsafe fn is_real_on_r_thread(x: libR_sys::SEXP) -> bool {
+    typeof_sexp(x) == libR_sys::SEXPTYPE::REALSXP as u32
+}
+
+/// `read_coord_ptr` for the R thread: accepts an ALTREP vector.
+///
+/// `st_linestring()` and `st_multipoint()` attach a class to their coordinate
+/// matrix, and R wraps a vector of 64 or more elements in an ALTREP wrapper
+/// when attributes are set. So every LINESTRING or MULTIPOINT of 32 or more XY
+/// points is ALTREP, `is_plain_real` rejects it, and the whole geometry used to
+/// be pre-rendered serially. Resolving the pointer here instead is one call per
+/// feature, and the coordinates are still written by the workers.
+pub(crate) unsafe fn read_coord_ptr_r_thread(x: libR_sys::SEXP) -> Option<CoordPtr> {
+    if !is_real_on_r_thread(x) {
+        return None;
+    }
+    let len = sexp_len(x);
+    // getAttrib, not an ATTRIB walk: ATTRIB is not part of R's API. Only
+    // possible on this side, because getAttrib marks the attribute
+    // NOT_MUTABLE, which is a write to a shared header -- see read_coord_ptr.
+    let dim = libR_sys::Rf_getAttrib(x, libR_sys::R_DimSymbol);
+    let ncol = if dim != libR_sys::R_NilValue && sexp_len(dim) == 2 {
+        let d = libR_sys::INTEGER(dim);
+        let c = *d.add(1);
+        if c > 0 { c as usize } else { 1 }
+    } else {
+        len.max(1)
+    };
+    Some(CoordPtr { ptr: libR_sys::REAL(x) as usize, len, ncol })
+}
+
 /// `read_coord_ptr` for a geometry known to carry no `dim`: a POINT, whose
 /// ordinates are a plain numeric vector.
 #[inline]
@@ -93,6 +130,18 @@ pub(crate) unsafe fn read_coord_ptr(x: libR_sys::SEXP) -> Option<CoordPtr> {
         return None;
     }
     let len = sexp_len(x);
+    // The one remaining use of ATTRIB, which R-exts 6.21.6 says is not part
+    // of the API, so `R CMD check --as-cran` reports it. The documented
+    // substitute, Rf_getAttrib, cannot be used here: it calls
+    // MARK_NOT_MUTABLE on the attribute it returns, and this function runs in
+    // the worker pool across the geometries of one sfc, so several threads
+    // would write the same shared SEXP header at once.
+    //
+    // The alternative is to pre-read every geometry's dim on the R thread,
+    // which is the serial walk the parallel extraction exists to avoid --
+    // computing per-row work that way measured 5 ms for a million features.
+    // One documented non-API read is the better trade; it touches three
+    // pointers per link and writes nothing.
     let dim = attrib_by_tag(x, libR_sys::R_DimSymbol);
     let ncol = if dim != libR_sys::R_NilValue && sexp_len(dim) == 2 {
         let d = libR_sys::INTEGER(dim);
@@ -208,55 +257,6 @@ pub(crate) unsafe fn render_geometry_to_bytes(
     }
 }
 
-/// Merges the per-chunk descriptors into one set, rebasing their indices.
-///
-/// Each chunk's `FastGeom` entries index that chunk's own `coords`, `counts`
-/// and `raw`, so concatenating the arrays means shifting the indices by the
-/// preceding chunks' lengths. The point of doing it is that the serialization
-/// pass can then choose its own row boundaries, independent of the ones
-/// extraction used.
-pub(crate) fn merge_chunk_geoms(
-    chunks: Vec<(usize, usize, usize, ChunkGeoms)>,
-) -> (GeometryBatch, Vec<FastGeom>) {
-    let n: usize = chunks.iter().map(|(_, _, _, cg)| cg.geoms.len()).sum();
-    let mut batch = GeometryBatch {
-        coords: Vec::with_capacity(chunks.iter().map(|(_, _, _, c)| c.batch.coords.len()).sum()),
-        counts: Vec::with_capacity(chunks.iter().map(|(_, _, _, c)| c.batch.counts.len()).sum()),
-        raw: Vec::with_capacity(chunks.iter().map(|(_, _, _, c)| c.batch.raw.len()).sum()),
-    };
-    let mut geoms = Vec::with_capacity(n);
-    for (_, _, _, cg) in chunks {
-        let cb = batch.coords.len() as u32;
-        let ctb = batch.counts.len() as u32;
-        let rb = batch.raw.len() as u32;
-        batch.coords.extend(cg.batch.coords);
-        batch.counts.extend(cg.batch.counts);
-        batch.raw.extend(cg.batch.raw);
-        for g in cg.geoms {
-            geoms.push(match g {
-                FastGeom::FlatList { start, len, typ } => FastGeom::FlatList {
-                    start: start + cb,
-                    len,
-                    typ,
-                },
-                FastGeom::MultiPolygon { coords_start, counts_start, n_polys } => {
-                    FastGeom::MultiPolygon {
-                        coords_start: coords_start + cb,
-                        counts_start: counts_start + ctb,
-                        n_polys,
-                    }
-                }
-                FastGeom::Prerendered { start, len } => FastGeom::Prerendered {
-                    start: start + rb,
-                    len,
-                },
-                other => other,
-            });
-        }
-    }
-    (batch, geoms)
-}
-
 /// Ordinates a geometry will emit, which is what its serialization costs.
 pub(crate) fn geom_ordinates(g: &FastGeom, batch: &GeometryBatch) -> usize {
     match g {
@@ -333,6 +333,9 @@ pub(crate) struct ChunkGeoms {
     pub(crate) batch: GeometryBatch,
     pub(crate) geoms: Vec<FastGeom>,
     pub(crate) pending: Vec<usize>,
+    /// Ordinates per row, filled by the worker that described them. Computing
+    /// it on the R thread afterwards was a serial 5 ms for a million features.
+    pub(crate) work: Vec<usize>,
 }
 
 pub(crate) fn extract_geometries_chunk(
@@ -490,7 +493,13 @@ pub(crate) fn extract_geometries_chunk(
             _ => prerender!(),
         }
     }
-    ChunkGeoms { batch, geoms: out, pending }
+    // Only the rows this worker could describe are weighed here; anything
+    // deferred is weighed by finish_pending_geoms once it has a descriptor.
+    let work = out
+        .iter()
+        .map(|g| geom_ordinates(g, &batch))
+        .collect::<Vec<usize>>();
+    ChunkGeoms { batch, geoms: out, pending, work }
 }
 
 /// Renders the geometries a worker had to leave alone. Must run on the R
@@ -499,6 +508,7 @@ pub(crate) fn extract_geometries_chunk(
 pub(crate) unsafe fn finish_pending_geoms(
     cg: &mut ChunkGeoms,
     geom_col: libR_sys::SEXP,
+    sfc_type: SfcType,
     start: usize,
     config: SerializerConfig,
 ) {
@@ -516,10 +526,100 @@ pub(crate) unsafe fn finish_pending_geoms(
             Some(p) => *p.add(i),
             None => libR_sys::VECTOR_ELT(geom_col, i as isize),
         };
+        // Most deferrals are only here because the coordinates are ALTREP,
+        // which is safe to resolve now that we are on the R thread. Doing so
+        // keeps the coordinate writing in the workers; falling through to
+        // render_geometry_to_bytes would serialise it.
+        let row_type = if sfc_type == SfcType::GeometryCollection
+            || sfc_type == SfcType::Unknown
+        {
+            get_row_sfg_type(sfg)
+        } else {
+            sfc_type
+        };
+        let fast = match row_type {
+            SfcType::Point => read_coord_ptr_r_thread(sfg).map(FastGeom::Point),
+            SfcType::MultiPoint | SfcType::LineString => {
+                read_coord_ptr_r_thread(sfg).map(|cp| FastGeom::Single(cp, row_type))
+            }
+            SfcType::MultiLineString | SfcType::Polygon => {
+                let n = sexp_len(sfg);
+                let rings = list_elems(sfg);
+                let base = cg.batch.coords.len();
+                let mut ok = n > 0 || sexp_len(sfg) == 0;
+                for j in 0..n {
+                    let ring = match rings {
+                        Some(r) => *r.add(j),
+                        None => libR_sys::VECTOR_ELT(sfg, j as isize),
+                    };
+                    match read_coord_ptr_r_thread(ring) {
+                        Some(cp) => cg.batch.coords.push(cp),
+                        None => { ok = false; break; }
+                    }
+                }
+                if ok {
+                    Some(FastGeom::FlatList {
+                        start: base as u32,
+                        len: n as u32,
+                        typ: row_type,
+                    })
+                } else {
+                    cg.batch.coords.truncate(base);
+                    None
+                }
+            }
+            SfcType::MultiPolygon => {
+                let n_polys = sexp_len(sfg);
+                let cbase = cg.batch.coords.len();
+                let nbase = cg.batch.counts.len();
+                let polys = list_elems(sfg);
+                let mut ok = true;
+                'p: for j in 0..n_polys {
+                    let poly = match polys {
+                        Some(pp) => *pp.add(j),
+                        None => libR_sys::VECTOR_ELT(sfg, j as isize),
+                    };
+                    let n_rings = sexp_len(poly);
+                    cg.batch.counts.push(n_rings);
+                    let rings = list_elems(poly);
+                    for k in 0..n_rings {
+                        let ring = match rings {
+                            Some(r) => *r.add(k),
+                            None => libR_sys::VECTOR_ELT(poly, k as isize),
+                        };
+                        match read_coord_ptr_r_thread(ring) {
+                            Some(cp) => cg.batch.coords.push(cp),
+                            None => { ok = false; break 'p; }
+                        }
+                    }
+                }
+                if ok {
+                    Some(FastGeom::MultiPolygon {
+                        coords_start: cbase as u32,
+                        counts_start: nbase as u32,
+                        n_polys: n_polys as u32,
+                    })
+                } else {
+                    cg.batch.coords.truncate(cbase);
+                    cg.batch.counts.truncate(nbase);
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(g) = fast {
+            cg.geoms[local] = g;
+            cg.work[local] = geom_ordinates(&g, &cg.batch);
+            continue;
+        }
+        // Genuinely needs the recursive writer: a GEOMETRYCOLLECTION, an
+        // unrecognised class, or coordinates that are not doubles at all.
         let s = cg.batch.raw.len() as u32;
         render_geometry_to_bytes(sfg, &mut cg.batch.raw, config, 0);
         let l = cg.batch.raw.len() as u32 - s;
-        cg.geoms[local] = FastGeom::Prerendered { start: s, len: l };
+        let g = FastGeom::Prerendered { start: s, len: l };
+        cg.geoms[local] = g;
+        cg.work[local] = geom_ordinates(&g, &cg.batch);
     }
 }
 
@@ -532,7 +632,7 @@ pub(crate) unsafe fn finish_pending_geoms(
 #[inline(always)]
 pub(crate) fn write_coord_value(buf: &mut Vec<u8>, v: f64, config: SerializerConfig) {
     if v.is_finite() {
-        write_f64_json(buf, v, config.digits, config.always_decimal);
+        write_f64_json(buf, v, config);
     } else if config.na == NaMode::Null {
         buf.extend_from_slice(b"null");
     } else if v == f64::INFINITY {
@@ -560,10 +660,144 @@ pub(crate) fn write_point_coords(buf: &mut Vec<u8>, cp: &CoordPtr, config: Seria
     buf.push(b']');
 }
 
+/// A coordinate matrix below this many ordinates is written by one thread.
+///
+/// Above it the matrix is split across the pool. The parallel pass over an
+/// sfc splits between GEOMETRIES, which does nothing for a layer whose work
+/// is one geometry: 2,000,000 coordinates in a single LineString measured 555
+/// ms with one worker busy and thirty-one idle, against 103 ms for the same
+/// coordinates spread over 2000 features. The threshold is well above any
+/// ordinary ring -- a 200-vertex polygon is 400 ordinates -- so the usual
+/// layer never pays for the check.
+pub(crate) const MIN_SPLIT_ORDINATES: usize = 1 << 17;
+
+/// One row range of a coordinate matrix, written into its own buffer.
+///
+/// The piece carries its own punctuation: the first opens the array, every
+/// later one starts with the comma that separates it from the piece before,
+/// and the last closes. They then concatenate with nothing in between.
+fn write_coord_rows(
+    out: &mut Vec<u8>,
+    cp: &CoordPtr,
+    nrow: usize,
+    ncol: usize,
+    start: usize,
+    end: usize,
+    config: SerializerConfig,
+) {
+    let p = cp.ptr as *const f64;
+    out.reserve((end - start) * (ncol * 26 + 3) + 2);
+    if start == 0 {
+        out.push(b'[');
+    }
+    for i in start..end {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.push(b'[');
+        for j in 0..ncol {
+            if j > 0 {
+                out.push(b',');
+            }
+            // Column-major: element (i, j) lives at i + j * nrow.
+            write_coord_value(out, unsafe { *p.add(i + j * nrow) }, config);
+        }
+        out.push(b']');
+    }
+    if end == nrow {
+        out.push(b']');
+    }
+}
+
+/// `write_coord_matrix` for a matrix big enough to be worth spreading.
+///
+/// Called from the R thread when the layer is one huge geometry, and from
+/// inside a worker when it is a handful of large ones; rayon work-steals
+/// either way, so the idle workers pick the pieces up in both cases.
+fn write_coord_matrix_split(
+    buf: &mut Vec<u8>,
+    cp: &CoordPtr,
+    nrow: usize,
+    ncol: usize,
+    config: SerializerConfig,
+) {
+    let ordinates = nrow * ncol;
+    let pieces = (ordinates / (MIN_SPLIT_ORDINATES / 2))
+        .clamp(2, desired_threads().max(1))
+        .min(nrow);
+    if pieces < 2 {
+        write_coord_rows(buf, cp, nrow, ncol, 0, nrow, config);
+        return;
+    }
+    // Contiguous row ranges; the last ends at nrow, which is what closes the
+    // array.
+    let per = (nrow + pieces - 1) / pieces;
+    let ranges: Vec<(usize, usize)> = (0..pieces)
+        .map(|k| (k * per, ((k + 1) * per).min(nrow)))
+        .filter(|&(s, e)| s < e)
+        .collect();
+    let cpc = *cp;
+    let parts: Vec<Vec<u8>> = with_pool(|| {
+        ranges
+            .par_iter()
+            .map(|&(s, e)| {
+                let mut b = Vec::new();
+                write_coord_rows(&mut b, &cpc, nrow, ncol, s, e, config);
+                b
+            })
+            .collect()
+    });
+
+    // Offsets are a prefix sum over the piece lengths, so the destination
+    // ranges are disjoint and the copies need no synchronisation. Serial
+    // concatenation of the pieces would be another pass over the whole
+    // geometry, which is the cost this is here to avoid.
+    let mut offs: Vec<usize> = Vec::with_capacity(parts.len());
+    let at = buf.len();
+    let mut acc = at;
+    for pt in &parts {
+        offs.push(acc);
+        acc += pt.len();
+    }
+    let total = acc - at;
+    buf.reserve(total);
+    unsafe {
+        struct Dst(*mut u8);
+        unsafe impl Send for Dst {}
+        unsafe impl Sync for Dst {}
+        impl Dst {
+            /// A method so the closure captures `&Dst`, which is Sync, rather
+            /// than the bare pointer, which is not.
+            #[inline]
+            unsafe fn write(&self, at: usize, src: &[u8]) {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(at), src.len());
+            }
+        }
+        let base = Dst(buf.as_mut_ptr());
+        if total < (1 << 22) || desired_threads() <= 1 {
+            for (pt, &o) in parts.iter().zip(offs.iter()) {
+                base.write(o, pt);
+            }
+        } else {
+            with_pool(|| {
+                parts
+                    .par_iter()
+                    .zip(offs.par_iter())
+                    .for_each(|(pt, &o)| base.write(o, pt))
+            });
+        }
+        buf.set_len(at + total);
+    }
+}
+
 /// An nrow x ncol column-major coordinate matrix as an array of rows.
 pub(crate) fn write_coord_matrix(buf: &mut Vec<u8>, cp: &CoordPtr, config: SerializerConfig) {
     let ncol = cp.ncol.max(1);
     let nrow = cp.len / ncol;
+    if cp.len >= MIN_SPLIT_ORDINATES && nrow >= 2 && desired_threads() > 1 {
+        write_coord_matrix_split(buf, cp, nrow, ncol, config);
+        return;
+    }
     let p = cp.ptr as *const f64;
     // One reservation for the whole ring: a 200-vertex polygon otherwise
     // grows the buffer repeatedly inside the hottest sf loop.
@@ -669,7 +903,7 @@ pub(crate) fn write_geometry_parallel(
     }
 }
 
-pub(crate) fn process_feature_parallel(out: &mut JsonWriter, row: usize, props: &[(Vec<u8>, ThreadSafeColumn)], geom: &FastGeom, batch: &GeometryBatch, config: SerializerConfig) {
+pub(crate) fn process_feature_parallel(out: &mut JsonWriter, row: usize, props: &[(Key, ThreadSafeColumn)], geom: &FastGeom, batch: &GeometryBatch, config: SerializerConfig) {
     out.push_bytes(FEAT_HEAD);
     let mut needs_comma = false;
     for (key, col) in props {
@@ -690,7 +924,7 @@ pub(crate) fn process_feature_parallel(out: &mut JsonWriter, row: usize, props: 
 
 /// jsonlite's dataframe = "values": each row is a bare array of its values,
 /// with the row name appended as a final element when one is emitted.
-pub(crate) fn process_row_values(out: &mut JsonWriter, row: usize, props: &[(Vec<u8>, ThreadSafeColumn)], config: SerializerConfig) {
+pub(crate) fn process_row_values(out: &mut JsonWriter, row: usize, props: &[(Key, ThreadSafeColumn)], config: SerializerConfig) {
     out.push_u8(b'[');
     for (i, (_key, col)) in props.iter().enumerate() {
         if i > 0 { out.push_u8(b','); }
@@ -699,7 +933,7 @@ pub(crate) fn process_row_values(out: &mut JsonWriter, row: usize, props: &[(Vec
     out.push_u8(b']');
 }
 
-pub(crate) fn process_row_generic(out: &mut JsonWriter, row: usize, props: &[(Vec<u8>, ThreadSafeColumn)], config: SerializerConfig) {
+pub(crate) fn process_row_generic(out: &mut JsonWriter, row: usize, props: &[(Key, ThreadSafeColumn)], config: SerializerConfig) {
     out.push_u8(b'{');
     let mut needs_comma = false;
     for (key, col) in props {
@@ -716,3 +950,307 @@ pub(crate) fn process_row_generic(out: &mut JsonWriter, row: usize, props: &[(Ve
     out.push_u8(b'}');
 }
 
+// ------------------------------------------------------------------
+// TESTS
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weighted_ranges_cover_everything_once() {
+        for work in [
+            vec![],
+            vec![1usize],
+            vec![1, 1, 1, 1],
+            vec![1, 1, 1, 1, 1, 1, 1, 100],
+            vec![100, 1, 1, 1, 1, 1, 1, 1],
+            vec![5; 1000],
+        ] {
+            for target in [1usize, 2, 4, 32] {
+                let r = weighted_ranges(&work, target);
+                if work.is_empty() {
+                    assert!(r.is_empty());
+                    continue;
+                }
+                assert_eq!(r[0].1, 0, "first range does not start at zero");
+                assert_eq!(r[r.len() - 1].2, work.len(), "last range does not end");
+                for w in r.windows(2) {
+                    assert_eq!(w[0].2, w[1].1, "ranges are not contiguous");
+                }
+                for (i, x) in r.iter().enumerate() {
+                    assert_eq!(x.0, i, "ids are not sequential");
+                    assert!(x.1 < x.2, "empty range");
+                }
+            }
+        }
+    }
+
+
+    // ---- the coordinate writers -----------------------------------
+
+    fn cfg4() -> SerializerConfig {
+        SerializerConfig {
+            df: DfMode::Rows,
+            na: NaMode::Null,
+            null: NullMode::List,
+            factor: FactorMode::String,
+            auto_unbox: false,
+            digits: Some(4),
+            matrix_colmajor: false,
+            always_decimal: false,
+            signif: false,
+            json_verbatim: false,
+            rownames: ROWNAMES_REAL,
+        }
+    }
+
+    fn cp(v: &[f64], ncol: usize) -> CoordPtr {
+        CoordPtr { ptr: v.as_ptr() as usize, len: v.len(), ncol }
+    }
+
+    fn render(g: &FastGeom, batch: &GeometryBatch) -> String {
+        let mut w = JsonWriter::with_capacity(0);
+        write_geometry_parallel(&mut w, g, batch, cfg4());
+        String::from_utf8(w.buf).unwrap()
+    }
+
+    fn empty_batch() -> GeometryBatch {
+        GeometryBatch { coords: Vec::new(), counts: Vec::new(), raw: Vec::new() }
+    }
+
+    #[test]
+    fn a_point_is_a_bare_coordinate_vector() {
+        let v = vec![1.5f64, 2.5];
+        let g = FastGeom::Point(cp(&v, 2));
+        assert_eq!(
+            render(&g, &empty_batch()),
+            r#"{"type":"Point","coordinates":[1.5,2.5]}"#
+        );
+        let z = vec![1.0f64, 2.0, 3.0];
+        let g = FastGeom::Point(cp(&z, 3));
+        assert_eq!(
+            render(&g, &empty_batch()),
+            r#"{"type":"Point","coordinates":[1,2,3]}"#
+        );
+    }
+
+    #[test]
+    fn a_coordinate_matrix_is_read_column_major() {
+        // sf stores a ring as an nrow x ncol column-major matrix, so the three
+        // XY points below are (1,4), (2,5), (3,6).
+        let m = vec![1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let g = FastGeom::Single(cp(&m, 2), SfcType::LineString);
+        assert_eq!(
+            render(&g, &empty_batch()),
+            r#"{"type":"LineString","coordinates":[[1,4],[2,5],[3,6]]}"#
+        );
+        let g = FastGeom::Single(cp(&m, 2), SfcType::MultiPoint);
+        assert_eq!(
+            render(&g, &empty_batch()),
+            r#"{"type":"MultiPoint","coordinates":[[1,4],[2,5],[3,6]]}"#
+        );
+        // Three ordinates per point, which is how XYZ arrives.
+        let m3 = vec![1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let g = FastGeom::Single(cp(&m3, 3), SfcType::LineString);
+        assert_eq!(
+            render(&g, &empty_batch()),
+            r#"{"type":"LineString","coordinates":[[1,3,5],[2,4,6]]}"#
+        );
+    }
+
+    #[test]
+    fn coordinate_pieces_concatenate_to_the_whole_matrix() {
+        // The split writer gives each piece its own punctuation: the first
+        // opens the array, every later one starts with the comma that
+        // separates it from the piece before, and the last closes. Get any of
+        // that wrong and the seam carries a doubled or a missing separator,
+        // which only shows up at a piece boundary. So: every row count, cut
+        // at every possible place, against one unsplit write.
+        let c = cfg4();
+        for ncol in 1..=4usize {
+            for nrow in 0..12usize {
+                let v: Vec<f64> = (0..nrow * ncol).map(|k| k as f64 * 1.5 - 3.0).collect();
+                let p = cp(&v, ncol);
+
+                let mut whole = Vec::new();
+                write_coord_matrix(&mut whole, &p, c);
+
+                // Writes the pieces the way the splitter does: empty ranges
+                // are dropped, because a piece that spans no rows would open
+                // and close the array by itself.
+                let join = |cuts: &[usize]| -> Vec<u8> {
+                    let mut out = Vec::new();
+                    let mut at = 0usize;
+                    for &k in cuts.iter().chain(std::iter::once(&nrow)) {
+                        if k > at {
+                            write_coord_rows(&mut out, &p, nrow, ncol, at, k, c);
+                            at = k;
+                        }
+                    }
+                    if out.is_empty() {
+                        write_coord_rows(&mut out, &p, nrow, ncol, 0, nrow, c);
+                    }
+                    out
+                };
+
+                // Every way of cutting the rows into two, then into three.
+                for a in 0..=nrow {
+                    assert_eq!(
+                        join(&[a]), whole,
+                        "{}x{} cut at {}: {:?} vs {:?}",
+                        nrow, ncol, a,
+                        String::from_utf8_lossy(&join(&[a])),
+                        String::from_utf8_lossy(&whole)
+                    );
+                    for b in a..=nrow {
+                        assert_eq!(
+                            join(&[a, b]), whole,
+                            "{}x{} cut at {} and {}", nrow, ncol, a, b
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_big_matrix_is_worth_splitting() {
+        // The threshold exists so an ordinary ring never pays for the check:
+        // a 200-vertex polygon is 400 ordinates, four hundred times under it.
+        assert!(MIN_SPLIT_ORDINATES >= 1 << 16, "too low to leave small rings alone");
+        let small: Vec<f64> = vec![1.0; 400];
+        assert!(small.len() < MIN_SPLIT_ORDINATES);
+        // And a piece count never exceeds the rows available, or two pieces
+        // would claim the same row and the last would never close the array.
+        for nrow in [1usize, 2, 3, 1000, 65_536, 2_000_000] {
+            for ncol in 1..=4usize {
+                let pieces = ((nrow * ncol) / (MIN_SPLIT_ORDINATES / 2)).clamp(2, 32).min(nrow);
+                assert!(pieces <= nrow.max(1), "{} rows asked for {} pieces", nrow, pieces);
+                let per = (nrow + pieces - 1) / pieces;
+                let ranges: Vec<(usize, usize)> = (0..pieces)
+                    .map(|k| (k * per, ((k + 1) * per).min(nrow)))
+                    .filter(|&(a, b)| a < b)
+                    .collect();
+                assert_eq!(ranges.first().map(|r| r.0), Some(0), "{} rows", nrow);
+                assert_eq!(ranges.last().map(|r| r.1), Some(nrow), "{} rows", nrow);
+                for w in ranges.windows(2) {
+                    assert_eq!(w[0].1, w[1].0, "{} rows: a gap or an overlap", nrow);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_ordinates_keep_their_spelling() {
+        let na = f64::from_bits(0x7FF0_0000_0000_07A2);
+        let v = vec![na, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let mut c = cfg4();
+        let one = |v: f64, c: SerializerConfig| {
+            let mut b = Vec::new();
+            write_coord_value(&mut b, v, c);
+            String::from_utf8(b).unwrap()
+        };
+        for &x in &v {
+            assert_eq!(one(x, c), "null", "na = null must flatten everything");
+        }
+        c.na = NaMode::String;
+        assert_eq!(one(v[0], c), "\"NA\"");
+        assert_eq!(one(v[1], c), "\"NaN\"");
+        assert_eq!(one(v[2], c), "\"Inf\"");
+        assert_eq!(one(v[3], c), "\"-Inf\"");
+    }
+
+    #[test]
+    fn a_polygon_reads_its_rings_from_the_batch() {
+        let outer = vec![0.0f64, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0];
+        let inner = vec![0.2f64, 0.4, 0.4, 0.2, 0.2, 0.2, 0.2, 0.4, 0.4, 0.2];
+        let batch = GeometryBatch {
+            coords: vec![cp(&outer, 2), cp(&inner, 2)],
+            counts: vec![2],
+            raw: Vec::new(),
+        };
+        let g = FastGeom::FlatList { start: 0, len: 2, typ: SfcType::Polygon };
+        let s = render(&g, &batch);
+        assert!(s.starts_with(r#"{"type":"Polygon","coordinates":[[["#), "{}", s);
+        assert_eq!(s.matches("],[[").count(), 1, "two rings expected in {}", s);
+
+        let g = FastGeom::MultiPolygon { coords_start: 0, counts_start: 0, n_polys: 1 };
+        let s = render(&g, &batch);
+        assert!(s.starts_with(r#"{"type":"MultiPolygon","coordinates":[[[["#), "{}", s);
+    }
+
+    #[test]
+    fn a_prerendered_geometry_is_spliced_verbatim() {
+        let batch = GeometryBatch {
+            coords: Vec::new(),
+            counts: Vec::new(),
+            raw: br#"{"type":"GeometryCollection","geometries":[]}"#.to_vec(),
+        };
+        let g = FastGeom::Prerendered { start: 0, len: batch.raw.len() as u32 };
+        assert_eq!(render(&g, &batch), r#"{"type":"GeometryCollection","geometries":[]}"#);
+        assert_eq!(render(&FastGeom::Null, &empty_batch()), "null");
+    }
+
+    #[test]
+    fn ordinate_counts_drive_the_split() {
+        // geom_ordinates is what weighted_ranges partitions on, so it has to
+        // reflect the work a geometry actually emits.
+        let a = vec![0.0f64; 10];
+        let b = vec![0.0f64; 100];
+        let batch = GeometryBatch {
+            coords: vec![cp(&a, 2), cp(&b, 2)],
+            counts: vec![2],
+            raw: vec![0u8; 80],
+        };
+        assert_eq!(geom_ordinates(&FastGeom::Null, &batch), 1);
+        assert_eq!(geom_ordinates(&FastGeom::Point(cp(&a, 2)), &batch), 10);
+        assert_eq!(
+            geom_ordinates(&FastGeom::Single(cp(&b, 2), SfcType::LineString), &batch),
+            100
+        );
+        assert_eq!(
+            geom_ordinates(
+                &FastGeom::FlatList { start: 0, len: 2, typ: SfcType::Polygon },
+                &batch
+            ),
+            110
+        );
+        // Prerendered bytes are divided by roughly the bytes an ordinate takes,
+        // so the two kinds of work land on one scale.
+        assert_eq!(geom_ordinates(&FastGeom::Prerendered { start: 0, len: 80 }, &batch), 10);
+    }
+
+    #[test]
+    fn ordinate_counts_refuse_to_read_past_the_batch() {
+        // A descriptor that points outside its batch must be clamped rather
+        // than indexed, since it would be read in a worker.
+        let a = vec![0.0f64; 4];
+        let batch = GeometryBatch { coords: vec![cp(&a, 2)], counts: vec![1], raw: Vec::new() };
+        let _ = geom_ordinates(&FastGeom::FlatList { start: 0, len: 99, typ: SfcType::Polygon }, &batch);
+        let _ = geom_ordinates(
+            &FastGeom::MultiPolygon { coords_start: 0, counts_start: 0, n_polys: 99 },
+            &batch,
+        );
+        let _ = geom_ordinates(&FastGeom::Prerendered { start: 0, len: 9999 }, &batch);
+    }
+
+    #[test]
+    fn a_heavy_tail_is_split_off() {
+        // The failure this exists for: an earlier version refused to close a
+        // chunk unless enough rows remained, which swept the large geometries
+        // at the end of the vector into one final chunk and made the whole
+        // partition pointless.
+        let mut work = vec![1usize; 9990];
+        work.extend([100_000usize; 10]);
+        let r = weighted_ranges(&work, 32);
+        assert!(r.len() > 1, "heavy tail was not split at all");
+        let last = r[r.len() - 1];
+        assert!(
+            last.2 - last.1 < 10,
+            "the ten heavy rows landed in one chunk of {}",
+            last.2 - last.1
+        );
+    }
+}

@@ -3,6 +3,8 @@
 #![allow(clippy::all)]
 
 use crate::*;
+// `c_void` is not in the glob above; decls.rs imports it for the same reason.
+use std::os::raw::c_void;
 
 // ------------------------------------------------------------------
 // C-API HELPERS
@@ -84,14 +86,34 @@ pub(crate) unsafe fn is_na_string(sexp: libR_sys::SEXP) -> bool { sexp == libR_s
 pub(crate) const STR_NON_ASCII: u8 = 1;
 pub(crate) const STR_ENC_ERROR: u8 = 2;
 pub(crate) const STR_DEPTH_ERROR: u8 = 4;
+/// A failure with a message of its own, recorded by a writer that has no way
+/// to return one: the recursive serializer writes into a buffer and cannot
+/// propagate a `Result`, and a worker cannot longjmp. The text is kept in
+/// `STR_ERR_MSG` and raised by `check_str_state` on the R thread.
+pub(crate) const STR_OTHER_ERROR: u8 = 8;
 
 thread_local! {
     static STR_STATE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static STR_ERR_MSG: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[inline]
 pub(crate) fn str_state_reset() {
     STR_STATE.with(|c| c.set(0));
+    STR_ERR_MSG.with(|m| *m.borrow_mut() = None);
+}
+
+/// Records a failure the caller cannot return. The first message wins, since
+/// it is the one nearest the cause.
+pub(crate) fn str_state_error(msg: String) {
+    STR_STATE.with(|c| c.set(c.get() | STR_OTHER_ERROR));
+    STR_ERR_MSG.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.is_none() {
+            *m = Some(msg);
+        }
+    });
 }
 #[inline]
 pub(crate) fn str_state_mark(bit: u8) {
@@ -162,6 +184,11 @@ pub(crate) unsafe fn charsxp_to_utf8_bytes(charsxp: libR_sys::SEXP) -> Option<&'
 /// longjmp over Rust frames. Checked once, on the R thread, before a result is
 /// handed back.
 pub(crate) fn check_str_state() -> PResult<()> {
+    if str_state_has(STR_OTHER_ERROR) {
+        if let Some(msg) = STR_ERR_MSG.with(|m| m.borrow().clone()) {
+            return Err(msg);
+        }
+    }
     if str_state_has(STR_ENC_ERROR) {
         return Err(
             "translating strings with \"bytes\" encoding is not allowed".to_string()
@@ -174,6 +201,35 @@ pub(crate) fn check_str_state() -> PResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Has the user asked to interrupt?
+///
+/// R-exts 6.13 says plainly that "No part of R can be interrupted whilst
+/// running long computations in compiled code, so programmers should make
+/// provision for the code to be interrupted at suitable points", and
+/// `R_CheckUserInterrupt` is how. But it signals an error when it fires,
+/// which longjmps -- straight past every Rust destructor between the check
+/// and the entry point, leaking the chunk buffers and whatever else is live.
+///
+/// So it is called inside `R_ToplevelExec`, which runs it in a fresh
+/// top-level context and reports a jump by returning FALSE rather than
+/// propagating it (R-exts 6.12). Nothing unwinds through Rust; the caller
+/// simply learns that an interrupt is pending and returns an error the
+/// ordinary way.
+///
+/// The R thread only. A worker may not touch the R API at all, and a jump out
+/// of a rayon closure would be worse than the thing this avoids.
+pub(crate) fn interrupt_pending() -> bool {
+    unsafe extern "C" fn probe(_: *mut c_void) {
+        unsafe { R_CheckUserInterrupt() };
+    }
+    unsafe { R_ToplevelExec(probe, std::ptr::null_mut()) == 0 }
+}
+
+/// The message for a run the user stopped.
+pub(crate) fn interrupted_msg() -> String {
+    "interrupted".to_string()
 }
 
 /// Hands `buf` back as an R raw vector.
@@ -190,18 +246,55 @@ pub(crate) fn finish_json_raw(buf: Vec<u8>) -> PResult<Robj> {
     Ok(Raw::from_bytes(&buf).into())
 }
 
-pub(crate) fn finish_json_string(buf: Vec<u8>) -> PResult<String> {
+/// Hands `buf` back as an R character vector of length one.
+///
+/// Built with `Rf_mkCharLenCE` straight from the bytes, marked `CE_UTF8`, and
+/// NOT validated as UTF-8 -- deliberately, because `toJSON()` does not
+/// validate either. A string R holds in its native encoding whose bytes are
+/// not valid UTF-8 is emitted by jsonlite unchanged:
+///
+/// ```r
+/// toJSON(rawToChar(as.raw(0xe9)))
+/// #> ["\xe9"]      and Encoding() on that says UTF-8, which it is not
+/// ```
+///
+/// That is not valid JSON and the mark on it is a lie, but reproducing
+/// jsonlite byte for byte is the contract, and refusing is not parity: we used
+/// to raise "serializer produced invalid UTF-8" for input `toJSON()` accepts.
+/// The one case jsonlite does refuse is a `"bytes"`-marked string, and
+/// `check_str_state` still raises exactly its message for that.
+///
+/// Going through `Rf_mkCharLenCE` rather than a Rust `String` is what makes it
+/// possible at all, since `String` cannot hold invalid UTF-8, and it also
+/// drops a validation pass over the whole output for any input carrying a
+/// non-ASCII byte.
+pub(crate) fn finish_json_string(buf: Vec<u8>) -> PResult<Robj> {
     check_str_state()?;
-    if !str_state_has(STR_NON_ASCII) {
-        debug_assert!(std::str::from_utf8(&buf).is_ok());
-        return Ok(unsafe { String::from_utf8_unchecked(buf) });
+    // R's own ceiling on a CHARSXP. The entry points guard before getting
+    // here; this is the backstop, since mkCharLenCE takes an int.
+    if buf.len() > i32::MAX as usize {
+        return Err(format!(
+            "Result is {} bytes; an R character string is limited to {} (2 GB). \
+             Use as_bytes = TRUE to get the same output as a raw vector, which has no such limit.",
+            buf.len(),
+            i32::MAX
+        ));
     }
-    String::from_utf8(buf).map_err(|e| {
-        format!(
-            "internal error: serializer produced invalid UTF-8 at byte {}",
-            e.utf8_error().valid_up_to()
-        )
-    })
+    unsafe {
+        // The STRSXP first, so that only one thing needs protecting: the
+        // CHARSXP goes straight into it and mkCharLenCE is the last
+        // allocation either of them makes.
+        let out = libR_sys::Rf_allocVector(libR_sys::SEXPTYPE::STRSXP, 1);
+        libR_sys::Rf_protect(out);
+        let cs = libR_sys::Rf_mkCharLenCE(
+            buf.as_ptr() as *const c_char,
+            buf.len() as i32,
+            libR_sys::cetype_t::CE_UTF8,
+        );
+        libR_sys::SET_STRING_ELT(out, 0, cs);
+        libR_sys::Rf_unprotect(1);
+        Ok(Robj::from_sexp(out))
+    }
 }
 
 #[inline]

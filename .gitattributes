@@ -1,0 +1,40 @@
+# Line endings, pinned so a tarball built on Windows matches one built
+# anywhere else.
+#
+# `R CMD build` converts C, C++ and Fortran sources and the makefiles under
+# src/ to LF itself, and R CMD check verifies the shell scripts -- so those are
+# safe either way. It does NOT touch .rs files or DESCRIPTION, which on a
+# Windows checkout with core.autocrlf=true shipped with CRLF. Rust's lexer and
+# R's DCF parser both accept that, so nothing was broken, but there is no
+# reason for the same commit to produce two different tarballs.
+
+* text=auto eol=lf
+
+# Sources and metadata that must not vary by platform.
+*.rs         text eol=lf
+*.toml       text eol=lf
+*.R          text eol=lf
+*.Rmd        text eol=lf
+*.c          text eol=lf
+*.h          text eol=lf
+*.md         text eol=lf
+DESCRIPTION  text eol=lf
+NAMESPACE    text eol=lf
+
+# Anything a Unix shell has to execute: a stray CR here is a hard failure
+# ("$'\r': command not found"), not a cosmetic difference.
+configure     text eol=lf
+configure.win text eol=lf
+cleanup       text eol=lf
+cleanup.win   text eol=lf
+*.sh          text eol=lf
+src/Makevars*  text eol=lf
+
+# Not text.
+*.png  binary
+*.jpg  binary
+*.xz   binary
+*.gz   binary
+*.shp  binary
+*.dbf  binary
+*.shx  binary
