@@ -1,14 +1,15 @@
 [package]
 name = "fastgeojson"
-version = "0.2.2" 
+version = "0.3.0"
 edition = "2021"
+rust-version = "1.65"
 
 [lib]
 crate-type = ["staticlib"]
 
 [dependencies]
-extendr-api = "0.8"
-extendr-ffi = "0.8"
+extendr-api = "0.8.2"
+extendr-ffi = "0.8.2"
 itoa = "1"
 ryu = "1"
 rayon = "=1.10.0"

@@ -1,5 +1,9 @@
 *.o
 *.so
 *.dll
+*.a
+Makevars
+Makevars.win
 target
 .cargo
+rust/vendor/

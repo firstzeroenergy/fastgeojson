@@ -3,142 +3,129 @@
 \name{fastgeojson}
 \alias{fastgeojson}
 \alias{as_json}
-\alias{sf_geojson_str}
-\alias{df_json_str}
-\title{Fast JSON and GeoJSON serialization for R}
+\title{Fast Serialization of R Objects to JSON and GeoJSON}
 \usage{
 as_json(
   x,
-  auto_unbox = FALSE,
-  dataframe = c("rows", "columns"),
-  na = NULL,
-  null = c("list", "null")
-)
-
-sf_geojson_str(
-  x,
-  auto_unbox = FALSE,
+  dataframe = c("rows", "columns", "values"),
+  matrix = c("rowmajor", "columnmajor"),
+  Date = c("ISO8601", "epoch"),
+  POSIXt = c("string", "ISO8601", "epoch", "mongo"),
+  factor = c("string", "integer"),
+  complex = c("string", "list"),
+  raw = c("base64", "hex", "mongo", "int", "js"),
+  null = c("list", "null"),
   na = c("null", "string"),
-  null = c("list", "null")
-)
-
-df_json_str(
-  x,
   auto_unbox = FALSE,
-  dataframe = c("rows", "columns"),
-  na = c("null", "string"),
-  null = c("list", "null")
+  digits = 4,
+  pretty = FALSE,
+  force = FALSE,
+  ...
 )
 }
 \arguments{
-\item{x}{An input object (e.g., a data.frame, sf object, list, or vector) to serialize.}
+\item{x}{The object to serialize.}
 
-\item{auto_unbox}{Logical. If \code{TRUE}, atomic vectors of length 1 are
-automatically unboxed into scalar JSON values (e.g., \verb{[1]} becomes \code{1}).
-If \code{FALSE} (default), they remain as single-element arrays (e.g., \verb{[1]}).}
+\item{dataframe}{How to encode data frames: \code{"rows"} (default,
+\verb{[\{"a":1\},\{"a":2\}]}) or \code{"columns"} (\verb{\{"a":[1,2]\}}).}
 
-\item{dataframe}{Character. Defines the output structure for data frames:
-\code{"rows"} (default) output as an array of objects (\verb{[\{...\}]}),
-\code{"columns"} output as an object of arrays (\code{{...}}).}
+\item{matrix}{How to encode matrices: \code{"rowmajor"} (default) or
+\code{"columnmajor"}.}
 
-\item{na}{Character. Controls how \code{NA} values are serialized:
-\itemize{
-\item \strong{Default:} Uses "smart" logic (see Type Handling section).
-\item \strong{"null":} Forces all \code{NA} values to be serialized as JSON \code{null}.
-\item \strong{"string":} Forces all \code{NA} values to be serialized as \code{"NA"}.
-}}
+\item{Date}{How to encode \code{Date}: \code{"ISO8601"} (default, \code{"2015-01-01"}) or
+\code{"epoch"} (days since 1970-01-01).}
 
-\item{null}{Character. Controls how \code{NULL} values (in lists) are serialized:
-\code{"list"} (default) maps to \verb{[]} (empty array) or \code{{}} (empty object) depending on context.
-\code{"null"} maps to JSON \code{null}.}
+\item{POSIXt}{How to encode date-times: \code{"string"} (default, R's own
+\code{format()}), \code{"ISO8601"}, \code{"epoch"} (milliseconds) or \code{"mongo"}.}
+
+\item{factor}{How to encode factors: \code{"string"} (default) or \code{"integer"}.}
+
+\item{complex}{How to encode complex numbers: \code{"string"} (default,
+\code{"1+2i"}) or \code{"list"} (\verb{\{"real":[..],"imaginary":[..]\}}).}
+
+\item{raw}{How to encode raw vectors: \code{"base64"} (default), \code{"hex"},
+\code{"mongo"}, \code{"int"} or \code{"js"}.}
+
+\item{null}{How to encode \code{NULL} inside lists: \code{"list"} (default, \code{{}}) or
+\code{"null"}.}
+
+\item{na}{How to encode missing values: \code{"null"} or \code{"string"}. When not
+supplied, type-specific defaults apply -- in particular, row-oriented data
+frame output omits the key entirely, matching \code{toJSON()}.}
+
+\item{auto_unbox}{If \code{TRUE}, length-one atomic vectors become JSON scalars
+rather than length-one arrays. Defaults to \code{FALSE}.}
+
+\item{digits}{Number of decimal places for numeric values, or \code{NA} for the
+shortest round-trippable representation. Wrap in \code{\link[base:AsIs]{base::I()}} to interpret
+as \emph{significant} digits instead. Defaults to \code{4}, as in \code{toJSON()}.}
+
+\item{pretty}{If \code{TRUE}, indent the output by two spaces; a number sets the
+indent width.}
+
+\item{force}{If \code{TRUE}, strip S3 classes that would otherwise raise an
+error. \code{sf} objects are exempt so geometry handling is preserved.}
+
+\item{...}{Further arguments passed to the encoder, mirroring
+\code{jsonlite::toJSON()}. Recognised here: \code{keep_vec_names}, \code{rownames},
+\code{json_verbatim}, \code{UTC}, \code{time_format}, \code{always_decimal}, \code{use_signif},
+\code{indent} and \code{sf}.}
 }
 \value{
-A length-one character vector containing the JSON string with class \code{"json"}.
-If the input is an \code{sf} object, the class is \code{c("geojson", "json")}.
+A length-one character vector of class \code{"json"}, or
+\code{c("geojson", "json")} for \code{sf} input.
 }
 \description{
-\code{fastgeojson} provides a high-performance serialization backend for converting
-R data structures into JSON strings. The core encoders are implemented
-in Rust using the \strong{extendr} framework and are designed to efficiently handle
-large spatial datasets, tabular data, and generic R objects.
-
-\strong{Recommended Usage:}
-All users should use the \code{\link[=as_json]{as_json()}} function. It acts as a universal "omnivore"
-that automatically detects the input type (\code{sf} object, data frame, list, or vector)
-and dispatch it to the correct high-performance Rust encoder.
-
-The resulting JSON is returned as a character string with an appropriate
-class (\code{"geojson"} / \code{"json"}), allowing it to be passed directly to client-side
-JavaScript libraries or web frameworks (like Shiny or Plumber) without
-additional serialization steps.
+\code{as_json()} is a high-performance, drop-in replacement for
+\code{\link[jsonlite:fromJSON]{jsonlite::toJSON()}}. It takes the same arguments, in the same order, with
+the same defaults, and is intended to produce byte-identical output. The
+encoders are implemented in Rust via \strong{extendr} and parallelised with
+\code{rayon}, and \code{sf} objects gain a dedicated GeoJSON path.
 }
 \details{
-For sufficiently large inputs (specifically Data Frames and Spatial objects),
-encoding is performed in parallel using multiple CPU cores via the Rust
-\strong{rayon} library.
+\strong{Drop-in use.} Because the signature matches \code{jsonlite::toJSON()}
+argument-for-argument, existing code can usually be ported by changing only
+the function name. Unknown arguments are accepted through \code{...} and passed
+to the encoder, exactly as \code{toJSON()} does.
 
-\strong{Performance Note:}
-There is \strong{no material performance penalty} for using \code{\link[=as_json]{as_json()}} compared to the
-specialized underlying functions. The internal dispatch mechanism has negligible
-overhead. Users are strongly encouraged to use \code{\link[=as_json]{as_json()}} exclusively.
-}
-\section{Type handling}{
-
+\strong{Encoding strategy.} \code{as_json()} inspects \code{x} and dispatches to the
+appropriate Rust encoder:
 \itemize{
-\item \strong{Numeric:} Written as JSON numbers. Infinite/NaN values are determined by the \code{na} argument.
-\item \strong{Logical:} Written as JSON booleans.
-\item \strong{Character:} Written as JSON strings with UTF-8 escaping.
-\item \strong{Matrix:} Serialized row-major as an array of arrays.
-\item \strong{Factor:} Encoded using their character levels.
+\item \strong{Simple features (\code{sf}):} a GeoJSON \code{FeatureCollection}.
+\item \strong{Data frames:} row- or column-oriented, processed in parallel
+in row chunks for large inputs.
+\item \strong{Atomic vectors and lists:} JSON arrays and objects,
+recursively.
 }
-}
 
-\section{Missing Value (NA) Handling}{
-
-\code{fastgeojson} employs "Smart" defaults to match standard R JSON conventions
-(specifically \code{jsonlite}), while offering strict overrides via the \code{na} argument:
-
+\strong{Type mapping.}
 \itemize{
-\item \strong{Default (Smart):}
-\itemize{
-\item In \strong{Column Mode} (\code{dataframe="columns"}), numeric \code{NA}s are converted
-to \code{"NA"} strings to maintain array type homogeneity. Non-numeric \code{NA}s become \code{null}.
-\item In \strong{Row Mode} (\code{dataframe="rows"}), \code{NA} values are usually \strong{omitted}
-from the object to reduce payload size.
-}
-\item \strong{Explicit (\code{na="null"}):} Forces all \code{NA} values (numeric or otherwise)
-to be serialized as JSON \code{null}.
-\item \strong{Explicit (\code{na="string"}):} Forces all \code{NA} values to be serialized as \code{"NA"}.
-}
+\item \strong{Numeric:} JSON numbers, rounded to \code{digits} decimal places.
+\code{NA}, \code{NaN}, \code{Inf} and \code{-Inf} follow the \code{na} argument.
+\item \strong{Logical:} \code{true} / \code{false}.
+\item \strong{Character:} JSON strings. Output is always valid UTF-8;
+latin1- and native-encoded inputs are translated.
+\item \strong{Factor:} labels, or integer codes when \code{factor = "integer"}.
+\item \strong{Date / POSIXt:} controlled by \code{Date} and \code{POSIXt}.
+\item \strong{complex / raw:} controlled by \code{complex} and \code{raw}.
 }
 
+\strong{Threads.} See \code{\link[=fastgeojson_threads]{fastgeojson_threads()}} to control parallelism.
+}
 \examples{
-# 1. Generic Objects
 as_json(list(a = 1, b = "foo", c = NA))
+as_json(list(val = 5), auto_unbox = TRUE)
 
-# 2. Auto-unbox
-as_json(list(val = 5), auto_unbox = TRUE)  # {"val":5}
-as_json(list(val = 5), auto_unbox = FALSE) # {"val":[5]}
+df <- data.frame(x = c(1.5, 2.5), y = c("a", "b"))
+as_json(df)
+as_json(df, dataframe = "columns")
 
-# 3. Data Frames (Row vs Column orientation)
-df <- data.frame(x = 1:2, y = c("a", NA))
-as_json(df, dataframe = "rows")    # [{"x":1,"y":"a"},{"x":2}]  (NA omitted)
-as_json(df, dataframe = "columns") # {"x":[1,2],"y":["a",null]}
-
-# 4. Controlling NA serialization
-# Force NA to null in all contexts
-as_json(c(1, NA, 3), na = "null") # [1, null, 3]
-# Force NA to string
-as_json(c(1, NA, 3), na = "string") # [1, "NA", 3]
-
-# 5. Spatial Data (sf)
 if (requireNamespace("sf", quietly = TRUE)) {
-     nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
-     # automatically detects sf and outputs GeoJSON FeatureCollection
-     geo_str <- as_json(nc[1:3, ])
+  nc <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
+  geo <- as_json(nc[1:2, ])
 }
 
 }
 \seealso{
-\code{\link[=as_json]{as_json()}} - The primary function for all serialization tasks.
+\code{\link[=fastgeojson_threads]{fastgeojson_threads()}} to control parallelism.
 }

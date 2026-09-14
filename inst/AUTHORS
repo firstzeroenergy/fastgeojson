@@ -1,28 +1,55 @@
-The authors of the dependency Rust crates:
+The Rust crates vendored in src/rust/vendor.tar.xz and statically linked into
+this package, with their upstream authors. Versions are those recorded in
+src/rust/Cargo.lock.
 
-extendr-api:
-  The extendr Project Developers
-  (including Andy Thomason, Claus O. Wilke, Mossa M. Reimert,
-   Ilia Kosenkov, Malcolm Barrett, and contributors)
 
-extendr-ffi:
-  The extendr Project Developers
-  (including Andy Thomason, Claus O. Wilke, Mossa M. Reimert,
-   Ilia Kosenkov, Malcolm Barrett, and contributors)
+crossbeam-deque 0.8.6
+  The Crossbeam Project Developers
 
-itoa:
-  David Tolnay
+crossbeam-epoch 0.9.18
+  The Crossbeam Project Developers
 
-ryu:
-  Ulf Adams
-  David Tolnay
-  Reini Urban
-  Other contributors
+crossbeam-utils 0.8.21
+  The Crossbeam Project Developers
 
-rayon:
-  The Rayon Project Developers
-  (including Niko Matsakis and contributors)
+either 1.15.0
+  bluss
 
-rayon-core:
-  The Rayon Project Developers
-  (including Niko Matsakis and contributors)
+extendr-api 0.8.2
+  andy-thomason <andy@andythomason.com>, Thomas Down, Mossa Merhi Reimert <mossa@sund.ku.dk>, Josiah Parry <josiah.parry@gmail.com>, Claus O. Wilke <wilke@austin.utexas.edu>, Hiroaki Yutani, Ilia A. Kosenkov <ilia.kosenkov@outlook.com>, Michael Milton <michael.r.milton@gmail.com>
+
+extendr-ffi 0.8.2
+  andy-thomason <andy@andythomason.com>, Thomas Down, Mossa Merhi Reimert <mossa@sund.ku.dk>, Josiah Parry <josiah.parry@gmail.com>, Claus O. Wilke <wilke@austin.utexas.edu>, Hiroaki Yutani, Ilia A. Kosenkov <ilia.kosenkov@outlook.com>, Michael Milton <michael.r.milton@gmail.com>
+
+extendr-macros 0.8.2
+  andy-thomason <andy@andythomason.com>, Thomas Down, Mossa Merhi Reimert <mossa@sund.ku.dk>, Josiah Parry <josiah.parry@gmail.com>, Claus O. Wilke <wilke@austin.utexas.edu>, Hiroaki Yutani, Ilia A. Kosenkov <ilia.kosenkov@outlook.com>, Michael Milton <michael.r.milton@gmail.com>
+
+itoa 1.0.17
+  David Tolnay <dtolnay@gmail.com>
+
+once_cell 1.21.3
+  Aleksey Kladov <aleksey.kladov@gmail.com>
+
+paste 1.0.15
+  David Tolnay <dtolnay@gmail.com>
+
+proc-macro2 1.0.105
+  David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com>
+
+quote 1.0.43
+  David Tolnay <dtolnay@gmail.com>
+
+rayon 1.10.0
+  Niko Matsakis <niko@alum.mit.edu>, Josh Stone <cuviper@gmail.com>
+
+rayon-core 1.12.1
+  Niko Matsakis <niko@alum.mit.edu>, Josh Stone <cuviper@gmail.com>
+
+ryu 1.0.22
+  David Tolnay <dtolnay@gmail.com>
+
+syn 2.0.113
+  David Tolnay <dtolnay@gmail.com>
+
+unicode-ident 1.0.22
+  David Tolnay <dtolnay@gmail.com>

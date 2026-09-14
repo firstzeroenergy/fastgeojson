@@ -2,5 +2,6 @@
 
 export(as_json)
 export(df_json_str)
+export(fastgeojson_threads)
 export(sf_geojson_str)
 useDynLib(fastgeojson, .registration = TRUE)

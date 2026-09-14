@@ -10,11 +10,15 @@
 #' @useDynLib fastgeojson, .registration = TRUE
 NULL
 
-sf_geojson_str_impl <- function(x, auto_unbox, na, null) .Call(wrap__sf_geojson_str_impl, x, auto_unbox, na, null)
+sf_geojson_str_impl <- function(x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor) .Call(wrap__sf_geojson_str_impl, x, auto_unbox, na, null, factor, digits, envelope, always_decimal, matrix_colmajor)
 
-df_json_str_impl <- function(x, auto_unbox, dataframe, na, null) .Call(wrap__df_json_str_impl, x, auto_unbox, dataframe, na, null)
+df_json_str_impl <- function(x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor) .Call(wrap__df_json_str_impl, x, auto_unbox, dataframe, na, null, factor, digits, always_decimal, matrix_colmajor)
 
-obj_json_str_impl <- function(x, auto_unbox, na, null) .Call(wrap__obj_json_str_impl, x, auto_unbox, na, null)
+obj_json_str_impl <- function(x, auto_unbox, na, null, factor, digits, always_decimal, matrix_colmajor) .Call(wrap__obj_json_str_impl, x, auto_unbox, na, null, factor, digits, always_decimal, matrix_colmajor)
+
+threads_impl <- function(n) .Call(wrap__threads_impl, n)
+
+pretty_json_impl <- function(x, indent) .Call(wrap__pretty_json_impl, x, indent)
 
 
 # nolint end

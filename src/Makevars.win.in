@@ -1,7 +1,5 @@
-## Generated from src/Makevars.in by tools/config.R -- DO NOT EDIT.
+## Generated from src/Makevars.win.in by tools/config.R -- DO NOT EDIT.
 ## Regenerate with: Rscript tools/config.R
-##
-## Portable make only: no GNU-make-only constructs.
 
 TARGET_DIR = rust/target
 LIBDIR     = @LIBDIR@
@@ -31,6 +29,13 @@ $(STATLIB):
 	rustc --version
 	cargo --version
 
+	# Rust's *-pc-windows-gnu std references libgcc_eh, which Rtools'
+	# static-posix toolchain does not ship under that name. An empty stub on
+	# LIBRARY_PATH satisfies the reference; the real unwinder comes from
+	# -static-libgcc at the final R link step.
+	mkdir -p $(TARGET_DIR)/libgcc_mock
+	touch $(TARGET_DIR)/libgcc_mock/libgcc_eh.a
+
 	@echo "== fastgeojson: vendored dependencies =="
 	mkdir -p rust/.cargo
 	if [ -f rust/vendor.tar.xz ]; then \
@@ -42,7 +47,8 @@ $(STATLIB):
 	fi
 
 	@echo "== fastgeojson: cargo build (target: @TARGET@) =="
-	CARGO_HOME="`pwd`/rust/.cargo"; export CARGO_HOME; \
+	export LIBRARY_PATH="$(LIBRARY_PATH);`pwd`/$(TARGET_DIR)/libgcc_mock" && \
+	export CARGO_HOME="`pwd`/rust/.cargo" && \
 	cargo build $(CARGO_BUILD_FLAGS) \
 		--manifest-path=rust/Cargo.toml \
 		--target-dir=$(TARGET_DIR)

@@ -1,4 +1,4 @@
 #!/bin/sh
-# configure -- generate src/Makevars via tools/config.R
+# configure.win -- generate src/Makevars.win via tools/config.R
 : "${R_HOME:=$(R RHOME)}"
 "${R_HOME}/bin/Rscript" tools/config.R

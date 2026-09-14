@@ -1,10 +1,26 @@
 .Rproj.user
 .Rhistory
 .RData
-src/rust/target/
-src/*.o
-src/*.so
-src/*.dll
+.RData*
 .httr-oauth
 .DS_Store
 .quarto
+
+# Build artefacts
+src/rust/target/
+src/rust/vendor/
+src/rust/.cargo/
+src/*.o
+src/*.so
+src/*.dll
+src/*.a
+src/Makevars
+src/Makevars.win
+
+# Claude Code / assistant scratch and configuration
+.claude/
+.claudeignore
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.mcp.json

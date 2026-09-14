@@ -8,38 +8,38 @@ library(purrr)
 
 cases <- list(
   # 1. Simple numeric
-  simple_numeric = data.frame(x = c(1, 2.5, -3), stringsAsFactors = FALSE),
-  
+  simple_numeric = data.frame(x = c(1, 0.02234235, -3), stringsAsFactors = FALSE),
+
   # 2. Integer with NA
   int_na = data.frame(
     x = c(1L, NA_integer_, 3L),
     stringsAsFactors = FALSE
   ),
-  
+
   # 3. Double with NA / NaN / Inf
   dbl_special = data.frame(
     x = c(1, NA_real_, NaN, Inf, -Inf),
     stringsAsFactors = FALSE
   ),
-  
+
   # 4. Logical with NA
   logical_na = data.frame(
     x = c(TRUE, FALSE, NA),
     stringsAsFactors = FALSE
   ),
-  
+
   # 5. Character with NA / "NA" / ""
   char_na = data.frame(
     ch = c("foo", NA, "bar", "NA", ""),
     stringsAsFactors = FALSE
   ),
-  
+
   # 6. Factor with NA and level "NA"
   factor_na = {
     x <- factor(c("a", "b", NA, "NA", "a"), levels = c("a", "b", "NA"))
     data.frame(x = x)
   },
-  
+
   # 7. Mixed types
   mixed = data.frame(
     i  = c(1L, NA_integer_, 3L),
@@ -48,12 +48,12 @@ cases <- list(
     ch = c("a", "", NA),
     stringsAsFactors = FALSE
   ),
-  
+
   # 8. Dates
   dates = data.frame(
     d = as.Date(c("2020-01-01", NA, "2020-01-03"))
   ),
-  
+
   # 9. POSIXct
   posixct = data.frame(
     dt = as.POSIXct(
@@ -63,20 +63,20 @@ cases <- list(
       tz = "UTC"
     )
   ),
-  
+
   # 10. Empty data.frame: 0 rows, 2 columns
   empty_rows = data.frame(
     x = integer(0),
     y = character(0),
     stringsAsFactors = FALSE
   ),
-  
+
   # 11. Zero-column data.frame: 3 rows, df[, 0]-style
   empty_cols = {
     df <- data.frame(x = 1:3, stringsAsFactors = FALSE)
     df[, 0, drop = FALSE]
   },
-  
+
   # 12. Data.frame with weird names
   weird_names = {
     df <- data.frame(
@@ -88,7 +88,7 @@ cases <- list(
     )
     df
   },
-  
+
   # 13. Nested list column (likely mismatch)
   list_column = data.frame(
     id = c(1L, 2L),
@@ -98,7 +98,7 @@ cases <- list(
     )),
     stringsAsFactors = FALSE
   ),
-  
+
   # 14. List column of atomic vectors
   list_atomic = data.frame(
     id = 1:3,
@@ -109,13 +109,48 @@ cases <- list(
     )),
     stringsAsFactors = FALSE
   ),
-  
+
   # 15. Row names present
   rownames_df = {
     df <- data.frame(x = 1:3, y = c("a", "b", "c"), stringsAsFactors = FALSE)
     rownames(df) <- c("r1", "r2", "r3")
     df
-  }
+  },
+
+  array_3d = {
+    arr <- array(
+      c(1, 2, NA, 4, 5, 6, 7, 8),
+      dim = c(2, 2, 2)
+    )
+    arr
+  },
+  
+  json_input = {
+    obj <- data.frame(
+      x = c(1, NA, 3),
+      y = c("a", "b", "c"),
+      stringsAsFactors = FALSE
+    )
+    
+    structure(
+      enc2utf8(as.character(
+        jsonlite::toJSON(
+          obj,
+          dataframe = "columns",
+          auto_unbox = FALSE,
+          digits = 2,
+          POSIXt = "string",
+          UTC = TRUE
+        )
+      )),
+      class = "json"
+    )
+  },
+  # 18. Strict Atomic / AsIs (Numeric)
+  strict_atomic_num = I(123),
+  
+  # 19. Strict Atomic / AsIs (Character)
+  strict_atomic_char = I("foo")
 )
 
 # ---- 2. Helper to run one case ----
@@ -123,25 +158,25 @@ cases <- list(
 
 run_case <- function(obj, name) {
   case_name <- as.character(name)
-  
+
   # Reference: jsonlite
   ref_res <- tryCatch(
     {
-      j <- jsonlite::toJSON(obj, dataframe = "rows", auto_unbox = FALSE)
+      j <- jsonlite::toJSON(obj, dataframe = "columns", strict_atomic = TRUE, json_verbatim = TRUE,  force = FALSE, auto_unbox = TRUE, digits = 2, use_signif = TRUE, POSIXt = "ISO8601", UTC = TRUE)
       list(error = NA_character_, json = as.character(j))
     },
     error = function(e) list(error = conditionMessage(e), json = NA_character_)
   )
-  
+
   # fastgeojson
   mine_res <- tryCatch(
     {
-      j <- fastgeojson::as_json(obj)
+      j <- fastgeojson::as_json(obj, dataframe = "columns", strict_atomic = TRUE, json_verbatim = TRUE,  force = FALSE, auto_unbox = TRUE, digits = 2, use_signif = TRUE, POSIXt = "ISO8601", UTC = TRUE)
       list(error = NA_character_, json = as.character(j))
     },
     error = function(e) list(error = conditionMessage(e), json = NA_character_)
   )
-  
+
   # Compare if both succeeded
   identical_flag <- NA
   if (is.na(ref_res$error) && is.na(mine_res$error)) {
@@ -149,7 +184,7 @@ run_case <- function(obj, name) {
     mine_min <- jsonlite::minify(mine_res$json)
     identical_flag <- identical(ref_min, mine_min)
   }
-  
+
   tibble(
     case        = case_name,
     ref_error   = ref_res$error,
